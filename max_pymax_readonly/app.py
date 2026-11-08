@@ -33,6 +33,9 @@ class State:
         self.duplicates = 0
         self.total = 0
         self.recovered = 0
+        self.disconnects = 0
+        self.recovery_errors = 0
+        self.history_pending = False
 
     def set_status(self, value):
         with self.lock:
@@ -44,7 +47,19 @@ class State:
 
     def get(self):
         with self.lock:
-            return self.status, self.qr_svg, self.unique, self.duplicates, self.total, self.recovered
+            return (self.status, self.qr_svg, self.unique, self.duplicates,
+                    self.total, self.recovered, self.disconnects,
+                    self.recovery_errors, self.history_pending)
+
+    def record_disconnect(self):
+        with self.lock:
+            self.disconnects += 1
+
+    def record_recovery(self, result):
+        with self.lock:
+            self.history_pending = not result.complete
+            if result.error:
+                self.recovery_errors += 1
 
     def add_recovered(self, count):
         with self.lock:
@@ -66,7 +81,8 @@ class Panel(BaseHTTPRequestHandler):
             self.send_error(403)
             return
         path = self.path.split("?")[0]
-        status, qr_svg, unique, duplicates, total, recovered = STATE.get()
+        (status, qr_svg, unique, duplicates, total, recovered,
+         disconnects, recovery_errors, pending) = STATE.get()
         if path.endswith("/qr.svg"):
             if not qr_svg:
                 self.send_error(404)
@@ -84,6 +100,8 @@ class Panel(BaseHTTPRequestHandler):
                 f'<p>Уникальных меток за запуск: {unique}; повторов: {duplicates}; '
                 f'уникальных за всё время: {total}</p>'
                 f'<p>Восстановлено из истории за запуск: {recovered}</p>'
+                f'<p>Обрывов MAX за запуск: {disconnects}; ошибок истории: {recovery_errors}; '
+                f'дочитывание истории: {"требуется" if pending else "завершено"}</p>'
                 '<p>Только тестовый номер. QR и данные сессии никому не пересылайте.</p>'
                 f'{picture}</html>'
             ).encode("utf-8")
@@ -145,8 +163,57 @@ async def serve(dialog):
     own_user_id = None
     recovery_chat_id = None  # memory-only; never persists a raw MAX chat ID
     recovery_lock = asyncio.Lock()
+    recovery_task = None
+    RECOVERY_INTERVAL = 60
     # Private 128-bit challenge scoped to this process. Never saved or logged.
     pairing_marker = "MAX HA PAIR " + secrets.token_hex(16).upper()
+
+    async def find_bound_chat(connected):
+        if saved_chat_mac is None or own_user_id is None:
+            return None
+        cached = connected.chats or []
+        candidates = [
+            c for c in cached if getattr(c, "is_dialog", False)
+        ]
+        found = next(
+            (c.id for c in candidates if store.is_bound_chat(
+                own_user_id, dialog, c.id, saved_chat_mac
+            )), None
+        )
+        if found is not None:
+            return found
+        try:
+            additional = await asyncio.wait_for(
+                connected.fetch_chats(), timeout=20
+            )
+        except Exception:
+            return None
+        return next(
+            (c.id for c in additional if getattr(c, "is_dialog", False)
+             and store.is_bound_chat(
+                 own_user_id, dialog, c.id, saved_chat_mac
+             )), None
+        )
+
+    async def background_recovery(connected):
+        nonlocal recovery_chat_id
+        try:
+            while True:
+                await asyncio.sleep(RECOVERY_INTERVAL)
+                if own_user_id is None or saved_chat_mac is None:
+                    continue
+                if recovery_chat_id is None:
+                    recovery_chat_id = await find_bound_chat(connected)
+                if recovery_chat_id is not None:
+                    await run_recovery(connected, recovery_chat_id)
+        except asyncio.CancelledError:
+            return
+
+    def start_background_recovery(connected):
+        nonlocal recovery_task
+        if recovery_task is not None:
+            recovery_task.cancel()
+        recovery_task = asyncio.create_task(background_recovery(connected))
 
     async def run_recovery(connected, chat_id):
         async with recovery_lock:
@@ -156,11 +223,15 @@ async def serve(dialog):
                 )
             except Exception:
                 # Exception payloads from unofficial clients may contain secrets.
+                STATE.record_recovery(type("Failure", (), {
+                    "complete": False, "error": "internal"
+                })())
                 STATE.set_status(
-                    "Историю тестового чата прочитать не удалось. "
-                    "Позиция восстановления не изменена."
+                    "Временная ошибка восстановления истории. "
+                    "Попробую повторить проверку автоматически."
                 )
                 return
+            STATE.record_recovery(result)
             STATE.add_recovered(result.recovered)
             STATE.update_counts(store)
             if result.initialized:
@@ -178,8 +249,8 @@ async def serve(dialog):
                 STATE.set_status(
                     "История тестового чата проверена частично "
                     f"({result.scanned} сообщений). "
-                    "Контрольная точка не обновлена, пропущенные метки "
-                    "можно восстановить при следующей попытке."
+                    "Промежуточная позиция сохранена. Попробую "
+                    "продолжить восстановление автоматически."
                 )
 
     @client.on_start()
@@ -199,36 +270,19 @@ async def serve(dialog):
         saved_chat_mac = store.get_binding(own_user_id, dialog)
         if saved_chat_mac is not None:
             STATE.set_status(
-                "MAX подключён. Сохранённая привязка тестового диалога "
-                "восстановлена. Проверяю пропущенные метки."
+                "MAX подключён. Привязка тестового диалога восстановлена. "
+                "Проверяю пропущенные метки."
             )
-            chats = connected.chats or []
-            matching = next(
-                (c.id for c in chats if getattr(c, "is_dialog", False)
-                 and store.is_bound_chat(
-                     own_user_id, dialog, c.id, saved_chat_mac
-                 )), None
-            )
-            if matching is None:
-                # One read-only list fetch if the login sync omitted the chat.
-                try:
-                    additional = await connected.fetch_chats()
-                except Exception:
-                    additional = []
-                matching = next(
-                    (c.id for c in additional if getattr(c, "is_dialog", False)
-                     and store.is_bound_chat(
-                         own_user_id, dialog, c.id, saved_chat_mac
-                     )), None
-                )
+            start_background_recovery(connected)
+            matching = await find_bound_chat(connected)
             if matching is not None:
                 recovery_chat_id = matching
                 await run_recovery(connected, matching)
             else:
                 STATE.set_status(
-                    "Привязка тестового диалога восстановлена. "
-                    "Чат пока не виден в списке MAX; восстановление истории "
-                    "начнётся при следующей входящей метке из него."
+                    "Привязка тестового диалога восстановлена, "
+                    "но чат не виден в списке MAX. Продолжу поиск "
+                    "в фоне и при следующем входящем сообщении."
                 )
             return
         chats = connected.chats or []
@@ -236,6 +290,7 @@ async def serve(dialog):
         if len(matches) == 1:
             saved_chat_mac = store.bind_chat(own_user_id, dialog, matches[0].id)
             recovery_chat_id = matches[0].id
+            start_background_recovery(connected)
             await run_recovery(connected, recovery_chat_id)
             STATE.set_status(
                 "Тестовый диалог найден и привязан. Ожидаю MAX HA TEST."
@@ -250,7 +305,11 @@ async def serve(dialog):
 
     @client.on_disconnect()
     async def disconnected(error, reconnect, delay):
-        nonlocal saved_chat_mac, own_user_id, recovery_chat_id
+        nonlocal saved_chat_mac, own_user_id, recovery_chat_id, recovery_task
+        STATE.record_disconnect()
+        if recovery_task is not None:
+            recovery_task.cancel()
+            recovery_task = None
         saved_chat_mac = None
         own_user_id = None
         recovery_chat_id = None
@@ -292,6 +351,7 @@ async def serve(dialog):
                 own_user_id, dialog, message.chat_id
             )
             recovery_chat_id = message.chat_id
+            start_background_recovery(connected)
             await run_recovery(connected, recovery_chat_id)
             STATE.set_status(
                 "Тестовый диалог привязан и сохранён. Отправьте новую "
@@ -306,6 +366,7 @@ async def serve(dialog):
             # Login/sync did not contain the chat, but this verified incoming
             # event safely resolves its ID for the pending read-only catch-up.
             recovery_chat_id = message.chat_id
+            start_background_recovery(connected)
             await run_recovery(connected, recovery_chat_id)
         if not MARKER.fullmatch(message.text or ""):
             return
