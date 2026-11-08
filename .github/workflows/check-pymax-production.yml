@@ -1,0 +1,38 @@
+name: Check isolated MAX PyMax production-candidate inbox
+
+on:
+  push:
+    branches:
+      - feature/pymax-production-inbox
+    paths:
+      - "max_pymax_inbox/**"
+      - ".github/workflows/check-pymax-production.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "max_pymax_inbox/**"
+      - ".github/workflows/check-pymax-production.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout production candidate
+        uses: actions/checkout@v4
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Compile code
+        run: python -m compileall -q max_pymax_inbox
+      - name: Test queue privacy, Bot API and missed messages
+        run: python -m unittest discover -s max_pymax_inbox/tests -v
+      - name: Docker build without Chromium
+        run: docker build --build-arg BUILD_VERSION=1.0.0-rc1 --build-arg BUILD_ARCH=amd64 -t max-pymax-inbox:test ./max_pymax_inbox
+      - name: Check QR client imports and SSL certificates
+        run: |
+          docker run --rm --entrypoint python max-pymax-inbox:test -c 'from pymax import WebClient; import qrcode; import bot_api; import app; from pathlib import Path; assert len(list(Path("/app/certs").glob("*.pem"))) == 2; print("MAX inbox dependencies OK")'
