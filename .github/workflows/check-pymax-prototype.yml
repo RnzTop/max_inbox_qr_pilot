@@ -1,0 +1,24 @@
+name: Validate isolated PyMax read-only test addon
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Compile addon Python files
+        run: python -m compileall -q max_pymax_readonly
+      - name: Test test-only gating, privacy and local dedupe
+        run: python -m unittest discover -s max_pymax_readonly/tests -v
