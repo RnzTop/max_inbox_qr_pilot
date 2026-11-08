@@ -14,10 +14,10 @@ probe_cls = next(
     if isinstance(node, ast.ClassDef) and node.name == "WebSocketIdProbe"
 )
 sys.path.insert(0, str(SCRIPT.parent))
-from ws_binary_probe import scan_binary_frame
+from ws_binary_probe import frame_meta, scan_binary_frame
 from test_ws_binary_probe import pack, frame
 
-scope = {"json": json, "urlsplit": urlsplit, "scan_binary_frame": scan_binary_frame}
+scope = {"json": json, "urlsplit": urlsplit, "scan_binary_frame": scan_binary_frame, "frame_meta": frame_meta}
 exec(compile(ast.Module(body=[probe_cls], type_ignores=[]), str(SCRIPT), "exec"), scope)
 WebSocketIdProbe = scope["WebSocketIdProbe"]
 
