@@ -177,6 +177,21 @@ class _MsgpackStructuralProbe:
         return None
 
 
+
+def frame_meta(raw: bytes):
+    """Return only (command, request sequence, opcode), never message identifiers.
+
+    These are packet-routing fields, not MAX chat/message IDs.
+    """
+    if not isinstance(raw, bytes) or len(raw) < HDR.size or len(raw) > MAX_FRAME:
+        return None
+    ver, cmd, seq, opcode, packed = HDR.unpack_from(raw)
+    payload_size = packed & 0x00ffffff
+    if (ver not in (10, 11) or cmd not in (0, 1, 2, 3)
+            or opcode > 6000 or payload_size != len(raw) - HDR.size):
+        return None
+    return cmd, seq, opcode
+
 def scan_binary_frame(raw: bytes):
     """Return (status, whitelisted_payload) without returning identifiers.
 
