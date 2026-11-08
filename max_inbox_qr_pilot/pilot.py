@@ -176,6 +176,57 @@ def diagnose_message_ids(page):
         return "DOM: диагностика временно недоступна."
 
 
+
+def diagnose_exact_marker_nodes(page):
+    """Use the SAME marker and ancestors as snapshot(); reveal only counts."""
+    try:
+        result = page.get_by_text(MARKER).evaluate_all("""els => {
+            const counts = {
+                markers: els.length, bubbles: 0, indexed: 0,
+                inbound: 0, deep_index: 0, mid: 0, chat: 0, seq: 0
+            };
+            for (const el of els.slice(0, 100)) {
+                const bubble = el.closest('.bubbleContent');
+                if (!bubble) continue;
+                counts.bubbles++;
+                if (el.closest('[class*="--left"]')) counts.inbound++;
+                const index = bubble.closest('[data-index]');
+                if (index) counts.indexed++;
+                let depth = 0;
+                let current = bubble;
+                let mid = false, chat = false, seq = false;
+                while (current && depth < 40) {
+                    if (current === index && depth > 7) counts.deep_index++;
+                    for (const attr of current.attributes || []) {
+                        const key = attr.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+                        if (['mid', 'datamid', 'messageid', 'datamessageid',
+                             'msgid', 'datamsgid'].includes(key)) mid = true;
+                        if (['chatid', 'datachatid', 'peerid', 'datapeerid',
+                             'dialogid', 'datadialogid'].includes(key)) chat = true;
+                        if (['seq', 'dataseq', 'sequence', 'datasequence'].includes(key)) seq = true;
+                    }
+                    current = current.parentElement;
+                    depth++;
+                }
+                if (mid) counts.mid++;
+                if (chat) counts.chat++;
+                if (seq) counts.seq++;
+            }
+            return counts;
+        }""")
+        if not isinstance(result, dict):
+            return "Тестовые метки: проверка недоступна."
+        return (
+            "Метки: найдено={markers}; bubble={bubbles}; входящих={inbound}; "
+            "с data-index={indexed}; глубже 8 уровней={deep_index}; "
+            "mid={mid}; chat={chat}; seq={seq}."
+        ).format(**{name: min(int(result.get(name, 0)), 100)
+                   for name in ("markers", "bubbles", "inbound", "indexed",
+                                "deep_index", "mid", "chat", "seq")})
+    except Exception:
+        return "Тестовые метки: проверка временно недоступна."
+
+
 def diagnose_page_state(page):
     """Only return bounded counters and booleans, never URLs or page text."""
     try:
@@ -279,7 +330,7 @@ def run(options):
                 opened = True
                 time.sleep(2)
             events = snapshot(page)
-            diagnostics = diagnose_message_ids(page)
+            diagnostics = diagnose_message_ids(page) + " " + diagnose_exact_marker_nodes(page)
             if not events:
                 status = ("В тестовом диалоге ожидаю начальную метку MAX HA TEST и четыре цифры. "
                           + diagnostics)
