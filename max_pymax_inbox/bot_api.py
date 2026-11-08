@@ -86,7 +86,8 @@ class MaxBotAPI:
         chat = self._request("GET", f"/chats/{self.chat_id}")
         if (chat.get("chat_id") != self.chat_id
                 or chat.get("type") != "chat"
-                or chat.get("status") != "active"):
+                or chat.get("status") != "active"
+                or chat.get("is_public") is not False):
             raise BotApiError("invalid_destination")
         self.bot_id = bot_id
         return bot_id
