@@ -1,8 +1,9 @@
-"""Bounded, read-only replay of missed test markers from one verified MAX DM.
+"""Resumable, bounded read-only replay for one verified MAX test dialogue.
 
-The only persisted message data are HMAC fingerprints already managed by SeenIds.
-No message content or raw chat IDs are stored or logged.
+Only HMAC message fingerprints, a binding MAC and timestamp cursors persist.
+History content, raw chat identifiers and account identifiers are never logged.
 """
+import asyncio
 from dataclasses import dataclass
 import re
 import time
@@ -12,6 +13,7 @@ TEST_MARKER = re.compile(r"^MAX HA TEST [0-9]{4,16}$")
 PAGE_SIZE = 50
 MAX_PAGES = 10
 OVERLAP_MS = 5_000
+REQUEST_TIMEOUT_SEC = 20
 
 
 @dataclass(frozen=True)
@@ -24,7 +26,6 @@ class RecoveryResult:
 
 
 def _message_time_ms(value):
-    # MAX commonly uses milliseconds; accept seconds if a payload uses them.
     if type(value) is not int:
         return None
     if 1_000_000_000 <= value < 10_000_000_000:
@@ -37,12 +38,13 @@ def _message_time_ms(value):
 async def recover_history(
     client, store, account_id, dialog, chat_id, *, now_ms=None,
     page_size=PAGE_SIZE, max_pages=MAX_PAGES,
+    request_timeout=REQUEST_TIMEOUT_SEC,
 ):
-    """Replay only exact incoming test markers after the last completed sweep.
+    """Continue a persisted snapshot, up to 500 messages per invocation.
 
-    Only scan a verified HMAC-bound chat, read backwards from a fixed snapshot,
-    and advance the cursor only if the boundary is reached. If the bounded scan
-    is incomplete, leave the previous cursor intact to avoid message loss.
+    Read backwards and persist a page cursor *only after* every accepted
+    message was durably fingerprinted. Network errors retain the checkpoint.
+    A new snapshot begins only when the earlier snapshot is complete.
     """
     if chat_id is None or not store.is_bound_chat(
         account_id, dialog, chat_id, store.get_binding(account_id, dialog)
@@ -50,85 +52,114 @@ async def recover_history(
         return RecoveryResult(error="unverified_dialog")
     if not (1 <= page_size <= PAGE_SIZE and 1 <= max_pages <= MAX_PAGES):
         return RecoveryResult(error="invalid_limit")
+    if not (1 <= request_timeout <= REQUEST_TIMEOUT_SEC):
+        return RecoveryResult(error="invalid_timeout")
 
-    end_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
+    now = int(time.time() * 1000) if now_ms is None else int(now_ms)
     previous = store.history_cursor(account_id, dialog)
     if previous is None:
-        # Fail closed on migration/first pairing: never ingest a lifetime of
-        # old messages simply because there was no prior high-water mark.
-        store.advance_history_cursor(account_id, dialog, end_ms)
+        # First run / migration: no historic import without an explicit
+        # trusted checkpoint. Future outages can be replayed.
+        store.advance_history_cursor(account_id, dialog, now)
         return RecoveryResult(complete=True, initialized=True)
-    if previous > end_ms:
+    if previous > now:
         return RecoveryResult(error="clock_moved_back")
-    if previous == end_ms:
-        return RecoveryResult(complete=True)
 
-    cutoff_ms = max(0, previous - OVERLAP_MS)
-    before_ms = end_ms + 1
+    scan = store.history_scan(account_id, dialog)
+    if scan is None:
+        if previous == now:
+            return RecoveryResult(complete=True)
+        scan = store.start_history_scan(
+            account_id, dialog, now, max(0, previous - OVERLAP_MS)
+        )
+    snapshot_ms, cutoff_ms, before_ms = scan
+    if snapshot_ms > now or snapshot_ms < previous:
+        return RecoveryResult(error="clock_moved_back")
+
     inspected = 0
-    candidates = []
-    complete = False
+    recovered = 0
     for _ in range(max_pages):
         try:
-            messages = await client.fetch_history(
-                chat_id=chat_id,
-                from_time=before_ms,
-                backward=page_size,
-                forward=0,
-                get_messages=True,
+            messages = await asyncio.wait_for(
+                client.fetch_history(
+                    chat_id=chat_id, from_time=before_ms,
+                    backward=page_size, forward=0, get_messages=True,
+                ),
+                timeout=request_timeout,
             )
         except Exception:
-            # Never leak MAX payloads/tokens in logs.
-            return RecoveryResult(scanned=inspected, error="history_request_failed")
+            # Never include MAX exception text in the UI or logs.
+            return RecoveryResult(
+                scanned=inspected, recovered=recovered,
+                error="history_request_failed",
+            )
 
+        if not isinstance(messages, list) or len(messages) > page_size:
+            return RecoveryResult(
+                scanned=inspected, recovered=recovered,
+                error="unexpected_page",
+            )
         if not messages:
-            complete = True
-            break
-        inspected += len(messages)
+            store.complete_history_scan(account_id, dialog, snapshot_ms)
+            return RecoveryResult(
+                scanned=inspected, recovered=recovered, complete=True,
+            )
+
         times = [_message_time_ms(getattr(m, "time", None)) for m in messages]
         if any(t is None for t in times):
-            return RecoveryResult(scanned=inspected, error="invalid_message_time")
+            return RecoveryResult(
+                scanned=inspected, recovered=recovered,
+                error="invalid_message_time",
+            )
 
-        oldest_ms = min(times)
-        for m, timestamp in zip(messages, times):
-            if cutoff_ms <= timestamp <= end_ms:
-                candidates.append((timestamp, m))
+        inspected += len(messages)
+        oldest = min(times)
+        if oldest >= before_ms:
+            return RecoveryResult(
+                scanned=inspected, recovered=recovered,
+                error="history_no_progress",
+            )
 
-        # The server page has crossed the known checkpoint.
-        if oldest_ms <= cutoff_ms or len(messages) < page_size:
-            complete = True
-            break
-        if oldest_ms >= before_ms:
-            return RecoveryResult(scanned=inspected, error="history_no_progress")
-        before_ms = oldest_ms
+        for message, timestamp in sorted(
+            zip(messages, times), key=lambda entry: entry[1]
+        ):
+            if not (cutoff_ms <= timestamp <= snapshot_ms):
+                continue
+            mid = getattr(message, "id", None)
+            from_chat = getattr(message, "chat_id", None)
+            sender = getattr(message, "sender", None)
+            if mid is None or (from_chat is not None and from_chat != chat_id):
+                continue
+            if sender is None or sender == account_id:
+                continue
+            if not TEST_MARKER.fullmatch(getattr(message, "text", "") or ""):
+                continue
+            if store.observe(chat_id, mid, count_duplicate=False):
+                recovered += 1
 
-    recovered = 0
-    in_sweep = set()
-    for _, msg in sorted(candidates, key=lambda item: item[0]):
-        message_id = getattr(msg, "id", None)
-        if message_id is None:
-            continue
-        payload_chat = getattr(msg, "chat_id", None)
-        # Missing chat_id is allowed in a response scoped to a requested chat.
-        if payload_chat is not None and payload_chat != chat_id:
-            continue
-        sender = getattr(msg, "sender", None)
-        if sender is None or sender == account_id:
-            continue
-        if not TEST_MARKER.fullmatch(getattr(msg, "text", "") or ""):
-            continue
-        key = str(message_id)
-        if key in in_sweep:
-            continue
-        in_sweep.add(key)
-        if store.observe(chat_id, message_id):
-            recovered += 1
+        # If the page is shorter than requested, or the oldest item is
+        # earlier than the known boundary, the snapshot is fully scanned.
+        if len(messages) < page_size or oldest <= cutoff_ms:
+            store.complete_history_scan(account_id, dialog, snapshot_ms)
+            return RecoveryResult(
+                scanned=inspected, recovered=recovered, complete=True,
+            )
 
-    if complete:
-        store.advance_history_cursor(account_id, dialog, end_ms)
+        # +1 retains an overlap of the oldest millisecond to avoid dropping
+        # messages on page boundaries. If a timestamp is too crowded to
+        # advance, stop safely instead of silently skipping messages.
+        next_before = oldest + 1
+        if not cutoff_ms < next_before < before_ms:
+            return RecoveryResult(
+                scanned=inspected, recovered=recovered,
+                error="history_timestamp_collision",
+            )
+        store.save_history_scan_position(
+            account_id, dialog, snapshot_ms, next_before
+        )
+        before_ms = next_before
+
     return RecoveryResult(
-        scanned=inspected,
-        recovered=recovered,
-        complete=complete,
-        error="" if complete else "history_limit_reached",
+        scanned=inspected, recovered=recovered,
+        error="history_limit_reached",
     )
