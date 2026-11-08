@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 
 from playwright.sync_api import sync_playwright
 
+from auth_health import AuthWatch
 from cursor import TestCursor
 from inbox import Inbox
 from run_group_test import MaxAPI
@@ -126,6 +127,25 @@ def run(options):
     account = options["test_account_label"].strip()
     if not dialog or not account or not options["test_bot_token"].strip():
         raise ValueError("Заполните имя тестового диалога, метку аккаунта и токен")
+    # A dedicated send-only MAX API client can alert through the existing
+    # booking bot. Do not subscribe or call /updates using that bot token.
+    alert_token = str(options.get("alert_bot_token") or "").strip()
+    alert_chat = str(options.get("alert_chat_id") or "").strip()
+    if (alert_token or alert_chat) and (not alert_token or
+            not re.fullmatch(r"-?[0-9]+", alert_chat) or int(alert_chat) == 0):
+        raise ValueError("Для уведомлений нужны alert_bot_token и числовой alert_chat_id")
+
+    def send_alert(message):
+        if not alert_token:
+            return False
+        # POST-only: the separate booking app remains the only consumer of
+        # webhook/polling events and continues handling its own callbacks.
+        MaxAPI(alert_token).call("POST", "/messages",
+                                {"chat_id": int(alert_chat)},
+                                {"text": message, "notify": True})
+        return True
+
+    watch = AuthWatch(DATA / "auth_health.json", send_alert)
     queue = Inbox(DATA / "pilot.sqlite3")
     api = MaxAPI(options["test_bot_token"].strip())
     bot = api.call("GET", "/me")
@@ -153,6 +173,7 @@ def run(options):
             if urlsplit(page.url).hostname != "web.max.ru":
                 raise ValueError("Браузер покинул веб-версию MAX")
             if show_login_if_needed(page):
+                watch.observed("login")
                 opened = False
                 time.sleep(5)
                 continue
@@ -171,6 +192,7 @@ def run(options):
                 target.click(timeout=5000)
                 opened = True
                 time.sleep(2)
+            watch.observed("online")
             events = snapshot(page)
             if not events:
                 status = "В тестовом диалоге ожидаю начальную метку MAX HA TEST и четыре цифры."
