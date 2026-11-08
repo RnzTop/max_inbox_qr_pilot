@@ -424,6 +424,7 @@ async def serve(token, chat_id):
             return
         scope = store.scope(own_id, bot.bot_id, bot.chat_id)
         store.recover_inflight()
+        store.recover_inflight_edits()
         STATE.set_counts(store, scope)
         STATE.set_status(
             "MAX авторизован. Запущен приём личных сообщений "
@@ -446,6 +447,7 @@ async def serve(token, chat_id):
             scanner_task.cancel()
             scanner_task = None
         store.recover_inflight()
+        store.recover_inflight_edits()
         own_id = scope = None
         chat_cache.clear()
         STATE.set_qr(b"")
@@ -492,6 +494,7 @@ async def serve(token, chat_id):
             if task:
                 task.cancel()
         store.recover_inflight()
+        store.recover_inflight_edits()
         store.close()
 
 
