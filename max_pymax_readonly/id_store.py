@@ -36,6 +36,11 @@ class SeenIds:
             scope_mac TEXT NOT NULL,
             chat_mac TEXT NOT NULL
         )""")
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS history_progress (
+            slot INTEGER PRIMARY KEY CHECK (slot = 1),
+            scope_mac TEXT NOT NULL,
+            scanned_through_ms INTEGER NOT NULL
+        )""")
         self.conn.commit()
         self.unique = 0
         self.duplicates = 0
@@ -81,6 +86,38 @@ class SeenIds:
             return False
         actual = self._binding_mac("pymax-chat-v1", account_id, dialog, chat_id)
         return hmac.compare_digest(actual, expected_mac)
+
+    def history_cursor(self, account_id, dialog):
+        """Last successfully scanned time, scoped to a verified test binding."""
+        if self.get_binding(account_id, dialog) is None:
+            return None
+        scope = self._binding_mac("pymax-scope-v1", account_id, dialog)
+        row = self.conn.execute(
+            "SELECT scope_mac, scanned_through_ms FROM history_progress WHERE slot = 1"
+        ).fetchone()
+        if row is None or not hmac.compare_digest(row[0], scope):
+            return None
+        return row[1]
+
+    def advance_history_cursor(self, account_id, dialog, millis):
+        """Persist a completed sweep boundary, never for an unbound account."""
+        if self.get_binding(account_id, dialog) is None:
+            raise ValueError("Test dialogue must be verified before history use")
+        timestamp = int(millis)
+        if timestamp <= 0:
+            raise ValueError("Invalid cursor")
+        previous = self.history_cursor(account_id, dialog)
+        if previous is not None and timestamp < previous:
+            raise ValueError("History checkpoint cannot move backwards")
+        scope = self._binding_mac("pymax-scope-v1", account_id, dialog)
+        self.conn.execute(
+            "INSERT INTO history_progress(slot, scope_mac, scanned_through_ms) "
+            "VALUES (1, ?, ?) ON CONFLICT(slot) DO UPDATE SET "
+            "scope_mac = excluded.scope_mac, "
+            "scanned_through_ms = excluded.scanned_through_ms",
+            (scope, timestamp),
+        )
+        self.conn.commit()
 
     def observe(self, chat_id, message_id):
         if chat_id is None or message_id is None:
