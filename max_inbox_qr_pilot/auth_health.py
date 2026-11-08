@@ -26,7 +26,7 @@ class AuthWatch:
         self.path = Path(state_path)
         self.send_message = send_message
         self.clock = clock
-        self.last_attempt = float("-inf")
+        self.last_attempt = {"lost": float("-inf"), "restored": float("-inf")}
         self.state = {
             "ever_online": False,
             "current": "unknown",
@@ -75,9 +75,9 @@ class AuthWatch:
 
     def flush(self):
         pending = self.state["pending"]
-        if pending is None or self.clock() - self.last_attempt < 60:
+        if pending is None or self.clock() - self.last_attempt[pending] < 60:
             return
-        self.last_attempt = self.clock()
+        self.last_attempt[pending] = self.clock()
         try:
             ok = self.send_message(MESSAGES[pending])
         except Exception:
