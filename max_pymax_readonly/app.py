@@ -29,6 +29,7 @@ class State:
         self.qr_svg = b""
         self.unique = 0
         self.duplicates = 0
+        self.total = 0
 
     def set_status(self, value):
         with self.lock:
@@ -40,12 +41,13 @@ class State:
 
     def get(self):
         with self.lock:
-            return self.status, self.qr_svg, self.unique, self.duplicates
+            return self.status, self.qr_svg, self.unique, self.duplicates, self.total
 
     def update_counts(self, store):
         with self.lock:
             self.unique = store.unique
             self.duplicates = store.duplicates
+            self.total = store.count()
 
 
 STATE = State()
@@ -57,7 +59,7 @@ class Panel(BaseHTTPRequestHandler):
             self.send_error(403)
             return
         path = self.path.split("?")[0]
-        status, qr_svg, unique, duplicates = STATE.get()
+        status, qr_svg, unique, duplicates, total = STATE.get()
         if path.endswith("/qr.svg"):
             if not qr_svg:
                 self.send_error(404)
@@ -72,7 +74,8 @@ class Panel(BaseHTTPRequestHandler):
                 '<meta http-equiv="refresh" content="5">'
                 '<h1>MAX — PyMax тест (без отправки)</h1>'
                 f'<p>{escape(status)}</p>'
-                f'<p>Уникальных меток за запуск: {unique}; повторов: {duplicates}</p>'
+                f'<p>Уникальных меток за запуск: {unique}; повторов: {duplicates}; '
+                f'уникальных за всё время: {total}</p>'
                 '<p>Только тестовый номер. QR и данные сессии никому не пересылайте.</p>'
                 f'{picture}</html>'
             ).encode("utf-8")
@@ -118,6 +121,7 @@ def validate_test_options(options):
 
 async def serve(dialog):
     store = SeenIds(DATA / "pymax_test")
+    STATE.update_counts(store)
     # WARNING is intentional: debug frame logs may contain account tokens.
     logging.getLogger("pymax").setLevel(logging.WARNING)
     client = WebClient(
@@ -139,9 +143,14 @@ async def serve(dialog):
         chats = connected.chats or []
         matches = [c for c in chats if c.is_dialog and c.title == dialog]
         target_chat_id = matches[0].id if len(matches) == 1 else None
-        own_user_id = connected.me.contact.id if connected.me else None
+        profile = getattr(connected, "me", None)
+        contact = getattr(profile, "contact", None)
+        own_user_id = getattr(contact, "id", None)
         STATE.set_qr(b"")
-        if target_chat_id is None:
+        if own_user_id is None:
+            target_chat_id = None
+            STATE.set_status("Подключено к MAX, но ID тестового аккаунта не определён. Приём отключён.")
+        elif target_chat_id is None:
             STATE.set_status(
                 "Подключено к MAX, но тестовый диалог не выбран: "
                 f"точных совпадений {len(matches)}. "
