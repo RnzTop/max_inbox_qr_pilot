@@ -32,5 +32,11 @@
     "alert_bot_token": "password",
     "alert_chat_id": "str"
   },
-  "image": "ghcr.io/rnztop/max_inbox_qr_pilot-aarch64"
+  "image": "ghcr.io/rnztop/max_inbox_qr_pilot-aarch64",
+  "map": [
+    {
+      "type": "app_config",
+      "read_only": false
+    }
+  ]
 }
