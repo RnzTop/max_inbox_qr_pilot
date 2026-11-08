@@ -164,10 +164,9 @@ class MaxBotAPI:
             raise BotApiError("invalid_message")
         if not isinstance(employee_name, str) or not employee_name:
             raise BotApiError("invalid_assignee")
-        text = (
-            (body or "Новое обращение из MAX [текст уже удалён]")
-            + "\\n\\n✅ Взял в работу: " + employee_name[:100]
-        )[:4000]
+        suffix = "\n\n✅ Взял в работу: " + employee_name[:100]
+        base = body or "Новое обращение из MAX [текст уже удалён]"
+        text = base[:4000 - len(suffix)] + suffix
         self._request(
             "PUT", "/messages", {"message_id": message_id},
             {"text": text, "attachments": []},
