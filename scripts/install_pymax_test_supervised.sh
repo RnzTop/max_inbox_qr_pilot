@@ -7,7 +7,7 @@ if [ "$(id -u)" -ne 0 ]; then
   echo "Запустите через sudo bash, не через curl | bash."
   exit 1
 fi
-REF="$1"
+REF="${1:-}"
 if [[ ! "$REF" =~ ^[0-9a-f]{40}$ ]]; then
   echo "Требуется проверенный 40-символьный commit SHA."
   exit 1
@@ -47,7 +47,7 @@ for f in Dockerfile config.yaml run.sh app.py id_store.py README.md DOCS.md; do
 done
 python3 -m py_compile "$stage/app.py" "$stage/id_store.py"
 python3 -m json.tool "$stage/config.yaml" >/dev/null
-chmod 755 "$stage/run.sh"
+chmod 755 "$stage" "$stage/run.sh"
 chmod 644 "$stage/Dockerfile" "$stage/config.yaml" "$stage/app.py" \
   "$stage/id_store.py" "$stage/README.md" "$stage/DOCS.md"
 mv -- "$stage" "$install_dir"
