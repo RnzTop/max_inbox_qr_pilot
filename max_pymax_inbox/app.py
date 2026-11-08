@@ -1,7 +1,7 @@
 """Isolated MAX personal-inbox relay: PyMax QR receive -> Bot API group post.
 
-This add-on never consumes bot updates or mutates Home Assistant state.
-The working bot's webhook / polling / token ownership are unaffected.
+This add-on receives callbacks using its own dedicated bot only.
+It never mutates Home Assistant state or another bot's Webhook.
 """
 import asyncio
 from html import escape
@@ -19,6 +19,7 @@ from qrcode.image.svg import SvgPathImage
 from pymax import ExtraConfig, WebClient
 
 from bot_api import BotApiError, MaxBotAPI, parse_chat_id
+from callbacks import handle_callback
 from inbox_db import InboxDB
 from processor import _timestamp_ms, enqueue_personal_message, recover_chat
 
@@ -36,6 +37,8 @@ class State:
         self.sent = self.queued = self.uncertain = self.failed = 0
         self.received = self.restored = self.disconnects = 0
         self.errors = 0
+        self.assigned = self.edit_pending = 0
+        self.callbacks = 0
 
     def set_status(self, value):
         with self.lock:
@@ -54,6 +57,7 @@ class State:
         with self.lock:
             self.sent, self.queued = c["sent"], c["queued"]
             self.uncertain, self.failed = c["uncertain"], c["failed"]
+            self.assigned, self.edit_pending = db.claimed_counts(scope)
 
     def snapshot(self):
         with self.lock:
@@ -61,7 +65,9 @@ class State:
                         queued=self.queued, uncertain=self.uncertain,
                         failed=self.failed, received=self.received,
                         restored=self.restored, disconnects=self.disconnects,
-                        errors=self.errors)
+                        errors=self.errors, assigned=self.assigned,
+                        edit_pending=self.edit_pending,
+                        callbacks=self.callbacks)
 
 
 STATE = State()
@@ -98,6 +104,9 @@ class Panel(BaseHTTPRequestHandler):
                 f'восстановлено: {state["restored"]}; '
                 f'обрывов MAX: {state["disconnects"]}; '
                 f'ошибок: {state["errors"]}</p>'
+                f'<p>Взято в работу: {state["assigned"]}; '
+                f'ожидают обновления карточки: {state["edit_pending"]}; '
+                f'нажатий обработано за запуск: {state["callbacks"]}</p>'
                 '<p>Содержимое обращений хранится локально в /data. '
                 'В события и сущности Home Assistant обращения не публикуются. '
                 'QR и токены не пересылайте.</p>'
@@ -149,8 +158,9 @@ async def serve(token, chat_id):
         await asyncio.to_thread(bot.preflight)
     except (BotApiError, ValueError):
         STATE.set_status(
-            "Не удалось проверить токен бота или закрытый рабочий чат. "
-            "Проверьте права бота и настройки. Отправка не запущена."
+            "Не удалось проверить токен, закрытый чат или подписки бота. "
+            "Для кнопок нужен отдельный бот без Webhook и других "
+            "подключённых обработчиков. Отправка не запущена."
         )
         return
 
@@ -168,6 +178,7 @@ async def serve(token, chat_id):
     scope = None
     sender_task = None
     scanner_task = None
+    callback_task = None
     wake_sender = asyncio.Event()
     scan_lock = asyncio.Lock()
     name_cache = {}
@@ -194,6 +205,32 @@ async def serve(token, chat_id):
 
     async def sender_worker(my_scope, my_generation):
         while my_generation == generation:
+            edit = store.reserve_claim_edit(my_scope)
+            if edit is not None:
+                edit_fingerprint, original_mid, body, employee = edit
+                try:
+                    await asyncio.to_thread(
+                        bot.edit_claimed, original_mid, body, employee
+                    )
+                except BotApiError as exc:
+                    if exc.kind in ("forbidden", "rejected", "invalid_message"):
+                        store.finish_claim_edit(edit_fingerprint, "failed")
+                    else:
+                        store.finish_claim_edit(edit_fingerprint, "pending")
+                    STATE.record("errors")
+                    await asyncio.sleep(10)
+                except Exception:
+                    store.finish_claim_edit(edit_fingerprint, "pending")
+                    STATE.record("errors")
+                    await asyncio.sleep(10)
+                else:
+                    store.finish_claim_edit(edit_fingerprint, "done")
+                    STATE.set_status(
+                        "Карточка обновлена: обращение закреплено за сотрудником."
+                    )
+                    await asyncio.sleep(1.2)
+                STATE.set_counts(store, my_scope)
+                continue
             notice = store.reserve(my_scope)
             if notice is None:
                 wake_sender.clear()
@@ -204,7 +241,9 @@ async def serve(token, chat_id):
                 continue
             fingerprint, body = notice
             try:
-                mid = await asyncio.to_thread(bot.send_text, body)
+                mid = await asyncio.to_thread(
+                    bot.send_card, body, "take:" + fingerprint
+                )
             except BotApiError as exc:
                 if exc.kind == "rate_limited":
                     store.finish(fingerprint, "queued")
@@ -233,6 +272,52 @@ async def serve(token, chat_id):
                 STATE.set_status("Обращение доставлено в рабочий чат MAX.")
             STATE.set_counts(store, my_scope)
             await asyncio.sleep(1.2)
+
+    async def callback_worker(my_scope):
+        """Poll only a dedicated test bot; cursor advances after DB commits."""
+        bot_scope = store.callback_scope(bot.bot_id, bot.chat_id)
+        while True:
+            try:
+                old_marker = store.callback_marker(bot_scope)
+                events, next_marker = await asyncio.to_thread(
+                    bot.get_updates, old_marker
+                )
+                for event in events:
+                    status, callback_id = handle_callback(
+                        event, store, my_scope, bot.chat_id, bot.bot_id
+                    )
+                    if status == "claimed":
+                        STATE.record("callbacks")
+                        STATE.set_counts(store, my_scope)
+                        wake_sender.set()
+                    if callback_id and status in ("claimed", "already_claimed"):
+                        note = (
+                            "Заявка закреплена за сотрудником"
+                            if status == "claimed"
+                            else "Заявка уже взята в работу"
+                        )
+                        try:
+                            await asyncio.to_thread(
+                                bot.acknowledge, callback_id, note
+                            )
+                        except Exception:
+                            # Claim is already durable; failure to acknowledge
+                            # does not justify changing the assigned employee.
+                            STATE.record("errors")
+                if next_marker is not None:
+                    store.save_callback_marker(bot_scope, next_marker)
+                await asyncio.sleep(0.4)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # An API failure never resets the marker, releases a claim,
+                # or logs a sensitive MAX payload or credential.
+                STATE.record("errors")
+                STATE.set_status(
+                    "Ошибка чтения нажатий кнопок у выделенного бота. "
+                    "Попробую восстановить соединение."
+                )
+                await asyncio.sleep(5)
 
     async def list_recent_dialogs(connected):
         # MAX returns recent chats sorted by activity; scan up to 500 chats.
@@ -322,13 +407,15 @@ async def serve(token, chat_id):
 
     @client.on_start()
     async def started(connected):
-        nonlocal own_id, scope, sender_task, scanner_task, generation
+        nonlocal own_id, scope, sender_task, scanner_task, callback_task, generation
         generation += 1
         my_generation = generation
         if sender_task:
             sender_task.cancel()
         if scanner_task:
             scanner_task.cancel()
+        if callback_task:
+            callback_task.cancel()
         STATE.set_qr(b"")
         me = getattr(getattr(connected, "me", None), "contact", None)
         own_id = getattr(me, "id", None)
@@ -342,6 +429,7 @@ async def serve(token, chat_id):
             "MAX авторизован. Запущен приём личных сообщений "
             "и отправка уведомлений в рабочий чат."
         )
+        callback_task = asyncio.create_task(callback_worker(scope))
         sender_task = asyncio.create_task(sender_worker(scope, my_generation))
         scanner_task = asyncio.create_task(scanner_worker(connected, scope, my_generation))
         wake_sender.set()
@@ -400,7 +488,7 @@ async def serve(token, chat_id):
             "Возможно, потребуется повторная авторизация через QR."
         )
     finally:
-        for task in (sender_task, scanner_task):
+        for task in (sender_task, scanner_task, callback_task):
             if task:
                 task.cancel()
         store.recover_inflight()
