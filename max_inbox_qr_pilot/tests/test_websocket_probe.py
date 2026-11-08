@@ -43,7 +43,7 @@ class FakeSocket:
 
 
 class WebSocketProbeTests(unittest.TestCase):
-    def test_observes_only_max_socket_and_never_prints_secrets(self):
+    def test_observes_all_page_sockets_and_only_counts_max_shaped_frames(self):
         probe = WebSocketIdProbe()
         page = FakePage()
         probe.attach(page)
@@ -75,8 +75,11 @@ class WebSocketProbeTests(unittest.TestCase):
         }))
         summary = probe.summary()
         self.assertIn("сокетов=2", summary)
-        self.assertIn("MAX-сокетов=1", summary)
-        self.assertIn("кадров=3", summary)
+        self.assertIn("наблюдаемых=2", summary)
+        self.assertIn("адреса oneme=1, max=0, другие=1", summary)
+        self.assertIn("кадров=4", summary)
+        self.assertIn("JSON=4", summary)
+        self.assertIn("протокол MAX=3", summary)
         self.assertIn("чатов с id=1", summary)
         self.assertIn("сообщений с id=3", summary)
         self.assertIn("кадров с chatId=2", summary)
@@ -102,12 +105,32 @@ class WebSocketProbeTests(unittest.TestCase):
     def test_protocol_field_locations_need_parent_chat_for_pair(self):
         probe = WebSocketIdProbe()
         probe._on_frame(json.dumps({
-            "opcode": 49, "payload": {"messages": [{"id": 1}]}
+            "cmd": 1, "opcode": 49, "payload": {"messages": [{"id": 1}]}
         }))
         self.assertIn("сообщений с id=1", probe.summary())
         self.assertIn("пар chat+message=0", probe.summary())
         # Request/response matching by seq would need separate handling:
         # We must not invent a chat_id for this response.
+
+    def test_unknown_host_can_be_real_web_client_protocol(self):
+        probe = WebSocketIdProbe()
+        page = FakePage()
+        probe.attach(page)
+        socket = FakeSocket("wss://new-websocket.example.test/socket?token=SECRET")
+        page.connect(socket)
+        socket.receive(json.dumps({
+            "cmd": 0, "opcode": 128,
+            "payload": {"chatId": 123, "message": {
+                "id": "SECRET_MESSAGE_ID", "text": "SECRET_BODY"
+            }}
+        }))
+        summary = probe.summary()
+        self.assertIn("адреса oneme=0, max=0, другие=1", summary)
+        self.assertIn("кадров=1", summary)
+        self.assertIn("протокол MAX=1", summary)
+        self.assertIn("пар chat+message=1", summary)
+        self.assertNotIn("SECRET", summary)
+        self.assertNotIn("123", summary)
 
     def test_does_not_interfere_with_page_handlers(self):
         probe = WebSocketIdProbe()
