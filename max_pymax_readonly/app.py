@@ -16,6 +16,7 @@ from qrcode.image.svg import SvgPathImage
 from pymax import ExtraConfig, WebClient
 
 from id_store import SeenIds
+from history_recovery import recover_history
 
 
 DATA = Path("/data")
@@ -31,6 +32,7 @@ class State:
         self.unique = 0
         self.duplicates = 0
         self.total = 0
+        self.recovered = 0
 
     def set_status(self, value):
         with self.lock:
@@ -42,7 +44,11 @@ class State:
 
     def get(self):
         with self.lock:
-            return self.status, self.qr_svg, self.unique, self.duplicates, self.total
+            return self.status, self.qr_svg, self.unique, self.duplicates, self.total, self.recovered
+
+    def add_recovered(self, count):
+        with self.lock:
+            self.recovered += count
 
     def update_counts(self, store):
         with self.lock:
@@ -60,7 +66,7 @@ class Panel(BaseHTTPRequestHandler):
             self.send_error(403)
             return
         path = self.path.split("?")[0]
-        status, qr_svg, unique, duplicates, total = STATE.get()
+        status, qr_svg, unique, duplicates, total, recovered = STATE.get()
         if path.endswith("/qr.svg"):
             if not qr_svg:
                 self.send_error(404)
@@ -77,6 +83,7 @@ class Panel(BaseHTTPRequestHandler):
                 f'<p>{escape(status)}</p>'
                 f'<p>Уникальных меток за запуск: {unique}; повторов: {duplicates}; '
                 f'уникальных за всё время: {total}</p>'
+                f'<p>Восстановлено из истории за запуск: {recovered}</p>'
                 '<p>Только тестовый номер. QR и данные сессии никому не пересылайте.</p>'
                 f'{picture}</html>'
             ).encode("utf-8")
@@ -136,12 +143,48 @@ async def serve(dialog):
     )
     saved_chat_mac = None
     own_user_id = None
+    recovery_chat_id = None  # memory-only; never persists a raw MAX chat ID
+    recovery_lock = asyncio.Lock()
     # Private 128-bit challenge scoped to this process. Never saved or logged.
     pairing_marker = "MAX HA PAIR " + secrets.token_hex(16).upper()
 
+    async def run_recovery(connected, chat_id):
+        async with recovery_lock:
+            try:
+                result = await recover_history(
+                    connected, store, own_user_id, dialog, chat_id
+                )
+            except Exception:
+                # Exception payloads from unofficial clients may contain secrets.
+                STATE.set_status(
+                    "Историю тестового чата прочитать не удалось. "
+                    "Позиция восстановления не изменена."
+                )
+                return
+            STATE.add_recovered(result.recovered)
+            STATE.update_counts(store)
+            if result.initialized:
+                STATE.set_status(
+                    "Начальная точка истории сохранена. Следующая "
+                    "перезагрузка сможет восстановить пропущенные метки."
+                )
+            elif result.complete:
+                STATE.set_status(
+                    "История тестового чата проверена. "
+                    f"Новых меток из истории: {result.recovered}. "
+                    "Ожидаю входящую MAX HA TEST."
+                )
+            else:
+                STATE.set_status(
+                    "История тестового чата проверена частично "
+                    f"({result.scanned} сообщений). "
+                    "Контрольная точка не обновлена, пропущенные метки "
+                    "можно восстановить при следующей попытке."
+                )
+
     @client.on_start()
     async def started(connected):
-        nonlocal saved_chat_mac, own_user_id
+        nonlocal saved_chat_mac, own_user_id, recovery_chat_id
         # A personal chat often has no title in PyMax. Prefer the previously
         # authenticated HMAC binding, scoped to this account and dialog setting.
         profile = getattr(connected, "me", None)
@@ -149,6 +192,7 @@ async def serve(dialog):
         own_user_id = getattr(contact, "id", None)
         STATE.set_qr(b"")
         saved_chat_mac = None
+        recovery_chat_id = None
         if own_user_id is None:
             STATE.set_status("Подключено к MAX, но ID тестового аккаунта не определён. Приём отключён.")
             return
@@ -156,13 +200,43 @@ async def serve(dialog):
         if saved_chat_mac is not None:
             STATE.set_status(
                 "MAX подключён. Сохранённая привязка тестового диалога "
-                "восстановлена. Ожидаю новую метку MAX HA TEST."
+                "восстановлена. Проверяю пропущенные метки."
             )
+            chats = connected.chats or []
+            matching = next(
+                (c.id for c in chats if getattr(c, "is_dialog", False)
+                 and store.is_bound_chat(
+                     own_user_id, dialog, c.id, saved_chat_mac
+                 )), None
+            )
+            if matching is None:
+                # One read-only list fetch if the login sync omitted the chat.
+                try:
+                    additional = await connected.fetch_chats()
+                except Exception:
+                    additional = []
+                matching = next(
+                    (c.id for c in additional if getattr(c, "is_dialog", False)
+                     and store.is_bound_chat(
+                         own_user_id, dialog, c.id, saved_chat_mac
+                     )), None
+                )
+            if matching is not None:
+                recovery_chat_id = matching
+                await run_recovery(connected, matching)
+            else:
+                STATE.set_status(
+                    "Привязка тестового диалога восстановлена. "
+                    "Чат пока не виден в списке MAX; восстановление истории "
+                    "начнётся при следующей входящей метке из него."
+                )
             return
         chats = connected.chats or []
         matches = [c for c in chats if c.is_dialog and c.title == dialog]
         if len(matches) == 1:
             saved_chat_mac = store.bind_chat(own_user_id, dialog, matches[0].id)
+            recovery_chat_id = matches[0].id
+            await run_recovery(connected, recovery_chat_id)
             STATE.set_status(
                 "Тестовый диалог найден и привязан. Ожидаю MAX HA TEST."
             )
@@ -176,9 +250,10 @@ async def serve(dialog):
 
     @client.on_disconnect()
     async def disconnected(error, reconnect, delay):
-        nonlocal saved_chat_mac, own_user_id
+        nonlocal saved_chat_mac, own_user_id, recovery_chat_id
         saved_chat_mac = None
         own_user_id = None
+        recovery_chat_id = None
         STATE.set_qr(b"")
         STATE.set_status(
             "Соединение с MAX потеряно. Ожидаю переподключения."
@@ -187,7 +262,7 @@ async def serve(dialog):
 
     @client.on_message()
     async def got_message(message, connected):
-        nonlocal saved_chat_mac
+        nonlocal saved_chat_mac, recovery_chat_id
         # Fail closed until the logged-in test account identity is verified.
         if own_user_id is None or message.chat_id is None:
             return
@@ -216,6 +291,8 @@ async def serve(dialog):
             saved_chat_mac = store.bind_chat(
                 own_user_id, dialog, message.chat_id
             )
+            recovery_chat_id = message.chat_id
+            await run_recovery(connected, recovery_chat_id)
             STATE.set_status(
                 "Тестовый диалог привязан и сохранён. Отправьте новую "
                 "метку MAX HA TEST 8362."
@@ -225,6 +302,11 @@ async def serve(dialog):
             own_user_id, dialog, message.chat_id, saved_chat_mac
         ):
             return
+        if recovery_chat_id is None:
+            # Login/sync did not contain the chat, but this verified incoming
+            # event safely resolves its ID for the pending read-only catch-up.
+            recovery_chat_id = message.chat_id
+            await run_recovery(connected, recovery_chat_id)
         if not MARKER.fullmatch(message.text or ""):
             return
         store.observe(message.chat_id, message.id)
