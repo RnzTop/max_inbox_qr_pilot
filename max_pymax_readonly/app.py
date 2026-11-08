@@ -8,6 +8,7 @@ import logging
 import os
 from pathlib import Path
 import re
+import secrets
 import threading
 
 import qrcode
@@ -135,6 +136,8 @@ async def serve(dialog):
     )
     target_chat_id = None
     own_user_id = None
+    # Private 128-bit challenge scoped to this process. Never saved or logged.
+    pairing_marker = "MAX HA PAIR " + secrets.token_hex(16).upper()
 
     @client.on_start()
     async def started(connected):
@@ -152,9 +155,11 @@ async def serve(dialog):
             STATE.set_status("Подключено к MAX, но ID тестового аккаунта не определён. Приём отключён.")
         elif target_chat_id is None:
             STATE.set_status(
-                "Подключено к MAX, но тестовый диалог не выбран: "
-                f"точных совпадений {len(matches)}. "
-                "Выведите тестовый чат в последние диалоги и перезапустите."
+                "MAX подключён. По имени тестовый диалог не найден "
+                f"(совпадений {len(matches)}). "
+                "Для безопасной привязки отправьте из другого тестового "
+                "аккаунта в НУЖНЫЙ личный диалог точное сообщение: "
+                + pairing_marker
             )
         else:
             STATE.set_status("Тестовый диалог найден. Ожидаю новую входящую метку MAX HA TEST.")
@@ -171,12 +176,23 @@ async def serve(dialog):
 
     @client.on_message()
     async def got_message(message, connected):
-        # Fail closed until the account identity and exact chat are verified.
-        if target_chat_id is None or own_user_id is None:
-            return
-        if message.chat_id != target_chat_id:
+        nonlocal target_chat_id
+        # Fail closed until the logged-in test account identity is verified.
+        if own_user_id is None or message.chat_id is None:
             return
         if message.sender is None or message.sender == own_user_id:
+            return
+        if target_chat_id is None:
+            # Only the exact private challenge may select a dialogue.
+            # No other messages/IDs/names are retained at this stage.
+            if message.text == pairing_marker:
+                target_chat_id = message.chat_id
+                STATE.set_status(
+                    "Тестовый диалог привязан. Теперь отправьте из этого "
+                    "диалога новую метку MAX HA TEST 8361."
+                )
+            return
+        if message.chat_id != target_chat_id:
             return
         if not MARKER.fullmatch(message.text or ""):
             return
