@@ -82,6 +82,41 @@ def find_test_dialog(page, name):
     return visible[0], 1
 
 
+
+def show_login_if_needed(page):
+    """Detect MAX login without relying on one heading or exposing chat screenshots."""
+    global qr, status
+
+    # MAX can display a choice between phone number and QR sign-in.
+    switch = page.get_by_text(re.compile(r"^Войти\s+по\s+QR[-\s‑–]?коду$", re.I))
+    if switch.count() == 1 and switch.first.is_visible():
+        # Never click a chat message by mistake.
+        if page.locator("button.cell").count() == 0:
+            switch.first.click(timeout=5000)
+            page.wait_for_timeout(1500)
+
+    markers = (
+        page.get_by_role("heading", name=re.compile(r"(Войдите|Вход).*(MAX|QR)", re.I)),
+        page.get_by_text(re.compile(r"^(?:Отсканируйте|Наведите камеру).*QR[-\s‑–]?код", re.I)),
+        page.get_by_text(re.compile(r"^Войти\s+по\s+QR[-\s‑–]?коду$", re.I)),
+    )
+    is_login = any(locator.count() and locator.first.is_visible() for locator in markers)
+    if is_login:
+        status = "Открыта страница входа MAX. Отсканируйте QR-код в панели дополнения."
+        qr = page.screenshot()
+        return True
+
+    # A phone-login form is not a chat list, even if the specific QR title changed.
+    phone = page.locator('input[type="tel"]')
+    if phone.count() and phone.first.is_visible():
+        qr = b""
+        status = "Встроенный браузер MAX показывает вход по телефону, а не чаты. Нужен вход по QR-коду."
+        return True
+
+    qr = b""
+    return False
+
+
 def run(options):
     global status, qr
     if not options.get("test_confirmed"):
@@ -117,14 +152,10 @@ def run(options):
         while True:
             if urlsplit(page.url).hostname != "web.max.ru":
                 raise ValueError("Браузер покинул веб-версию MAX")
-            login = page.get_by_role("heading", name=re.compile("Войдите в MAX по QR-коду"))
-            if login.is_visible():
-                status = "Отсканируйте QR только телефоном тестового аккаунта MAX."
-                qr = page.screenshot()
+            if show_login_if_needed(page):
                 opened = False
                 time.sleep(5)
                 continue
-            qr = b""
             if not opened:
                 target, matches = find_test_dialog(page, dialog)
                 if target is None:
