@@ -13,6 +13,12 @@ probe_function = next(
 namespace = {}
 exec(compile(ast.Module(body=[probe_function], type_ignores=[]), str(MODULE), "exec"), namespace)
 diagnose = namespace["diagnose_message_ids"]
+state_function = next(
+    node for node in tree.body
+    if isinstance(node, ast.FunctionDef) and node.name == "diagnose_page_state"
+)
+exec(compile(ast.Module(body=[state_function], type_ignores=[]), str(MODULE), "exec"), namespace)
+diagnose_state = namespace["diagnose_page_state"]
 
 
 class StubPage:
@@ -58,6 +64,29 @@ class DOMProbeTests(unittest.TestCase):
             def evaluate(self, script):
                 raise RuntimeError("Secret text in browser exception")
         self.assertEqual(diagnose(BrokenPage()), "DOM: диагностика временно недоступна.")
+
+
+class PageStateTests(unittest.TestCase):
+    def test_page_status_only_counts(self):
+        message = diagnose_state(StubPage({
+            "ready": "complete", "elements": 250, "body_chars": 51,
+            "chat_rows": 0, "message_bubbles": 0, "message_indices": 0,
+            "chat_editors": 0, "phone_inputs": 1, "qr_canvas": 1,
+            "qr_words": True, "root_empty": False,
+            "private_text": "SECRET_MESSAGE",
+            "private_url": "https://web.max.ru/private"
+        }))
+        self.assertIn("строк чатов=0", message)
+        self.assertIn("телефонных полей=1", message)
+        self.assertIn("текстовый признак входа=да", message)
+        self.assertNotIn("SECRET", message)
+        self.assertNotIn("private", message)
+
+    def test_failure_does_not_reveal_exception(self):
+        class BrokenPage:
+            def evaluate(self, script):
+                raise RuntimeError("SECRET")
+        self.assertEqual(diagnose_state(BrokenPage()), "Страница: диагностика временно недоступна.")
 
 
 if __name__ == "__main__":
