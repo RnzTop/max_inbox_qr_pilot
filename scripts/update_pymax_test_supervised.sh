@@ -28,7 +28,7 @@ else
   exit 1
 fi
 
-files=(app.py id_store.py README.md DOCS.md config.yaml)
+files=(app.py id_store.py history_recovery.py README.md DOCS.md config.yaml)
 stage="$(mktemp -d)"
 trap 'rm -rf -- "$stage"' EXIT
 base="https://raw.githubusercontent.com/RnzTop/max_inbox_qr_pilot/$REF/max_pymax_readonly"
@@ -36,7 +36,7 @@ for f in "${files[@]}"; do
   curl --fail --silent --show-error --location --retry 3 --connect-timeout 10 --max-time 60 "$base/$f" -o "$stage/$f"
 done
 
-python3 -m py_compile "$stage/app.py" "$stage/id_store.py"
+python3 -m py_compile "$stage/app.py" "$stage/id_store.py" "$stage/history_recovery.py"
 python3 - "$stage/config.yaml" "$install_dir/config.yaml" <<'PY'
 import json
 import sys
@@ -46,7 +46,7 @@ with open(sys.argv[2], encoding="utf-8") as f:
     installed = json.load(f)
 assert updated["slug"] == "max_pymax_readonly"
 assert installed["slug"] == "max_pymax_readonly"
-assert updated["version"] == "0.0.3", updated["version"]
+assert updated["version"] == "0.0.4", updated["version"]
 assert updated["boot"] == "manual"
 PY
 
