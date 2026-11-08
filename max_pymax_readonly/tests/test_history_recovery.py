@@ -118,6 +118,83 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(result.error, "history_request_failed")
         self.assertEqual(self.store.history_cursor(100, "Test"), NOW)
 
+    def test_more_than_thousand_messages_resume_across_restart(self):
+        self.store.advance_history_cursor(100, "Test", NOW)
+        client = FakeHistory(
+            [msg(i, NOW + i * 1000) for i in range(1, 1201)]
+        )
+        first = self.run_recovery(client, NOW + 1_500_000)
+        self.assertFalse(first.complete)
+        self.assertEqual(first.error, "history_limit_reached")
+        self.assertGreater(first.recovered, 400)
+        self.assertEqual(self.store.history_cursor(100, "Test"), NOW)
+        scan = self.store.history_scan(100, "Test")
+        self.assertIsNotNone(scan)
+        self.assertEqual(scan[0], NOW + 1_500_000)
+
+        # Simulate power loss and a new Python process opening the same /data.
+        self.store.conn.close()
+        self.store = SeenIds(self.dir)
+        self.assertEqual(self.store.history_scan(100, "Test"), scan)
+        second = self.run_recovery(client, NOW + 1_600_000)
+        self.assertFalse(second.complete)
+        third = self.run_recovery(client, NOW + 1_700_000)
+        self.assertTrue(third.complete)
+        self.assertEqual(self.store.count(), 1200)
+        self.assertEqual(self.store.unique, second.recovered + third.recovered)
+        self.assertEqual(self.store.duplicates, 0)
+        self.assertIsNone(self.store.history_scan(100, "Test"))
+        self.assertEqual(self.store.history_cursor(100, "Test"), NOW + 1_500_000)
+        fourth = self.run_recovery(client, NOW + 1_800_000)
+        self.assertTrue(fourth.complete)
+        self.assertEqual(self.store.count(), 1200)
+
+    def test_network_break_mid_scan_preserves_position(self):
+        self.store.advance_history_cursor(100, "Test", NOW)
+        class FlakyHistory(FakeHistory):
+            def __init__(self, items):
+                super().__init__(items)
+                self.fail_call = 2
+
+            async def fetch_history(self, **kwargs):
+                if self.fail_call == len(self.calls) + 1:
+                    self.calls.append(kwargs)
+                    self.fail_call = None
+                    raise ConnectionError("MAX connection unavailable")
+                return await super().fetch_history(**kwargs)
+
+        client = FlakyHistory([msg(i, NOW + i * 1000) for i in range(1, 81)])
+        first = self.run_recovery(client, NOW + 100_000)
+        self.assertFalse(first.complete)
+        self.assertEqual(first.error, "history_request_failed")
+        self.assertGreater(first.recovered, 0)
+        self.assertEqual(self.store.history_cursor(100, "Test"), NOW)
+        self.assertIsNotNone(self.store.history_scan(100, "Test"))
+        next_result = self.run_recovery(client, NOW + 200_000)
+        self.assertTrue(next_result.complete)
+        self.assertEqual(self.store.count(), 80)
+
+    def test_same_millisecond_full_page_fails_closed(self):
+        self.store.advance_history_cursor(100, "Test", NOW)
+        client = FakeHistory([
+            msg(i, NOW + 2000) for i in range(1, 56)
+        ])
+        result = self.run_recovery(
+            client, NOW + 10000, page_size=50, max_pages=3
+        )
+        self.assertFalse(result.complete)
+        self.assertEqual(result.error, "history_timestamp_collision")
+        self.assertEqual(self.store.history_cursor(100, "Test"), NOW)
+        self.assertIsNotNone(self.store.history_scan(100, "Test"))
+
+    def test_rebinding_different_test_chat_resets_history_progress(self):
+        self.store.advance_history_cursor(100, "Test", NOW)
+        self.store.start_history_scan(100, "Test", NOW + 5000, NOW - 5000)
+        self.store.bind_chat(100, "Test", 43)
+        self.assertIsNone(self.store.history_cursor(100, "Test"))
+        self.assertIsNone(self.store.history_scan(100, "Test"))
+        self.assertEqual(self.store.count(), 0)
+
     def test_unverified_chat_is_never_scanned(self):
         client = FakeHistory()
         result = asyncio.run(recover_history(
