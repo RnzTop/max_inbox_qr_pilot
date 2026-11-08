@@ -18,7 +18,9 @@
     "test_dialog": "",
     "test_bot_username": "",
     "test_bot_token": "",
-    "test_chat_id": ""
+    "test_chat_id": "",
+    "alert_bot_token": "",
+    "alert_chat_id": ""
   },
   "schema": {
     "test_confirmed": "bool",
@@ -26,7 +28,9 @@
     "test_dialog": "str",
     "test_bot_username": "str",
     "test_bot_token": "password",
-    "test_chat_id": "str"
+    "test_chat_id": "str",
+    "alert_bot_token": "password",
+    "alert_chat_id": "str"
   },
   "image": "ghcr.io/rnztop/max_inbox_qr_pilot-aarch64"
 }
