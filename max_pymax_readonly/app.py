@@ -58,7 +58,7 @@ class State:
     def record_recovery(self, result):
         with self.lock:
             self.history_pending = not result.complete
-            if result.error:
+            if result.error and result.error != "history_limit_reached":
                 self.recovery_errors += 1
 
     def add_recovered(self, count):
@@ -245,12 +245,23 @@ async def serve(dialog):
                     f"Новых меток из истории: {result.recovered}. "
                     "Ожидаю входящую MAX HA TEST."
                 )
-            else:
+            elif result.error == "history_limit_reached":
                 STATE.set_status(
                     "История тестового чата проверена частично "
                     f"({result.scanned} сообщений). "
-                    "Промежуточная позиция сохранена. Попробую "
-                    "продолжить восстановление автоматически."
+                    "Промежуточная позиция сохранена. Продолжу "
+                    "восстановление автоматически."
+                )
+            elif result.error == "history_timestamp_collision":
+                STATE.set_status(
+                    "Неполная история: слишком много сообщений с одинаковым "
+                    "временем. Проверка остановлена без сдвига контрольной "
+                    "точки, чтобы исключить пропуски."
+                )
+            else:
+                STATE.set_status(
+                    "Временная ошибка чтения истории. Данные сохранены. "
+                    "Проверка повторится автоматически."
                 )
 
     @client.on_start()
