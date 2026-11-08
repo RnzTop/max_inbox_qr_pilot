@@ -1,4 +1,4 @@
-"""Outbound-only MAX Bot API transport. Never polls /updates or alters webhooks."""
+"""MAX Bot API: test-bot cards, callbacks and edits; never changes Webhooks."""
 import json
 from pathlib import Path
 import re
@@ -89,10 +89,52 @@ class MaxBotAPI:
                 or chat.get("status") != "active"
                 or chat.get("is_public") is not False):
             raise BotApiError("invalid_destination")
+        subscriptions = self._request("GET", "/subscriptions")
+        if (not isinstance(subscriptions.get("subscriptions"), list)
+                or subscriptions["subscriptions"]):
+            # Only a dedicated bot without an existing Webhook can be polled.
+            # Never delete/migrate a preexisting Webhook subscription.
+            raise BotApiError("webhook_in_use")
         self.bot_id = bot_id
         return bot_id
 
+    def get_updates(self, marker=None):
+        """Only for a dedicated test bot. Durable cursor is stored by the caller."""
+        if self.bot_id is None:
+            raise BotApiError("not_ready")
+        params = {"types": "message_callback", "limit": 100, "timeout": 10}
+        if marker is not None:
+            if type(marker) is not int or marker < 0:
+                raise BotApiError("invalid_marker")
+            params["marker"] = marker
+        data = self._request("GET", "/updates", params)
+        events, next_marker = data.get("updates"), data.get("marker")
+        if (not isinstance(events, list)
+                or (next_marker is not None
+                    and (type(next_marker) is not int or next_marker < 0))):
+            raise BotApiError("invalid_updates")
+        return events, next_marker
+
+    def send_card(self, text, payload):
+        if not isinstance(payload, str) or not re.fullmatch(
+            r"take:[0-9a-f]{64}", payload
+        ):
+            raise BotApiError("invalid_payload")
+        return self._send(text, {
+            "attachments": [{
+                "type": "inline_keyboard",
+                "payload": {"buttons": [[{
+                    "type": "callback",
+                    "text": "Взять в работу",
+                    "payload": payload,
+                }]]},
+            }]
+        })
+
     def send_text(self, text):
+        return self._send(text, {})
+
+    def _send(self, text, additions):
         if not self.bot_id:
             raise BotApiError("not_ready")
         if not isinstance(text, str) or not 1 <= len(text) <= 4000:
@@ -100,7 +142,7 @@ class MaxBotAPI:
         result = self._request(
             "POST", "/messages",
             {"chat_id": self.chat_id, "disable_link_preview": "true"},
-            {"text": text},
+            {"text": text, **additions},
         )
         msg = result.get("message")
         mid = (msg.get("body") or {}).get("mid") if isinstance(msg, dict) else None
@@ -108,3 +150,25 @@ class MaxBotAPI:
             # Accepted HTTP response but unknown status; never send twice.
             raise BotApiError("uncertain")
         return str(mid)
+
+    def acknowledge(self, callback_id, note):
+        if not isinstance(callback_id, str) or not callback_id.strip():
+            return
+        self._request(
+            "POST", "/answers", {"callback_id": callback_id},
+            {"notification": note[:180]},
+        )
+
+    def edit_claimed(self, message_id, body, employee_name):
+        if not isinstance(message_id, str) or not message_id:
+            raise BotApiError("invalid_message")
+        if not isinstance(employee_name, str) or not employee_name:
+            raise BotApiError("invalid_assignee")
+        text = (
+            (body or "Новое обращение из MAX [текст уже удалён]")
+            + "\\n\\n✅ Взял в работу: " + employee_name[:100]
+        )[:4000]
+        self._request(
+            "PUT", "/messages", {"message_id": message_id},
+            {"text": text, "attachments": []},
+        )
