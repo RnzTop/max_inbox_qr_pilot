@@ -15,6 +15,7 @@ from inbox import Inbox
 from run_group_test import MaxAPI
 from test_group import TestGroup
 from ws_binary_probe import frame_meta, scan_binary_frame
+from ws_id_stability import IdStability
 
 
 DATA = Path("/data")
@@ -286,7 +287,8 @@ class WebSocketIdProbe:
 
     MAX_FRAME_BYTES = 2 * 1024 * 1024
 
-    def __init__(self):
+    def __init__(self, stability=None):
+        self.stability = stability
         self.counts = {
             "sockets": 0, "watched": 0,
             "oneme_sockets": 0, "max_sockets": 0, "other_sockets": 0,
@@ -319,13 +321,14 @@ class WebSocketIdProbe:
             cmd, seq, opcode = meta
             if cmd != 0 or opcode != 49:
                 return
-            kind, payload = scan_binary_frame(raw)
+            kind, payload = scan_binary_frame(
+                raw, fingerprint_key=(self.stability.key if self.stability else None))
             if kind not in ("msgpack", "lz4_msgpack"):
                 return
             if isinstance(payload, dict) and self._has_id(payload.get("chatId")):
                 self.counts["history_requests"] += 1
                 self._limit_pending()
-                self._history_pending[seq] = True
+                self._history_pending[seq] = payload.get("chatId")
         except Exception:
             self.counts["errors"] += 1
 
@@ -368,7 +371,8 @@ class WebSocketIdProbe:
             if isinstance(raw, bytes):
                 self.counts["binary"] += 1
                 meta = frame_meta(raw)
-                kind, data = scan_binary_frame(raw)
+                kind, data = scan_binary_frame(
+                    raw, fingerprint_key=(self.stability.key if self.stability else None))
                 if kind == "zstd":
                     self.counts["zstd"] += 1
                     return
@@ -464,8 +468,14 @@ class WebSocketIdProbe:
                 self.counts["history_ids"] += sum(
                     isinstance(m, dict) and self._has_id(m.get("id"))
                     for m in messages[:1000])
-            if self._history_pending.pop(seq, False):
+            chat_digest = self._history_pending.pop(seq, None)
+            if chat_digest:
                 self.counts["matched_history"] += 1
+                if self.stability and isinstance(messages, list):
+                    self.stability.history(
+                        chat_digest,
+                        [m.get("id") for m in messages[:1000] if isinstance(m, dict)],
+                    )
         elif opcode == 128 and cmd == 0:
             # Push-style message notification, NOT message history.
             self.counts["live_frames"] += 1
@@ -474,6 +484,8 @@ class WebSocketIdProbe:
                 self.counts["live_ids"] += 1
                 if self._has_id(data.get("chatId")):
                     self.counts["live_with_chat"] += 1
+                    if self.stability:
+                        self.stability.push(data.get("chatId"), message.get("id"))
 
     def summary(self):
         c = {k: min(v, 999999) for k, v in self.counts.items()}
@@ -494,7 +506,7 @@ class WebSocketIdProbe:
             "связано по seq={matched_history}, message.id={history_ids}; "
             "новых push кадров={live_frames}, message.id={live_ids}, "
             "с chatId={live_with_chat}; ошибок проверки={errors}."
-        ).format(**c)
+        ).format(**c) + (" " + self.stability.summary() if self.stability else "")
 
 def run(options):
     global status, qr
@@ -526,7 +538,7 @@ def run(options):
             headless=True, chromium_sandbox=True, accept_downloads=False,
         )
         page = context.pages[0] if context.pages else context.new_page()
-        ws_probe = WebSocketIdProbe()
+        ws_probe = WebSocketIdProbe(IdStability(DATA / "ws_stability"))
         ws_probe.attach(page)
         page.goto("https://web.max.ru/", wait_until="domcontentloaded")
         opened = False
