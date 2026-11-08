@@ -1,7 +1,9 @@
 """Synthetic WebSocket frames; no live MAX session, secrets or Playwright."""
 import ast
 import json
+import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -15,6 +17,7 @@ probe_cls = next(
 )
 sys.path.insert(0, str(SCRIPT.parent))
 from ws_binary_probe import frame_meta, scan_binary_frame
+from ws_id_stability import IdStability
 from test_ws_binary_probe import pack, frame
 
 scope = {"json": json, "urlsplit": urlsplit, "scan_binary_frame": scan_binary_frame, "frame_meta": frame_meta}
@@ -196,6 +199,46 @@ class WebSocketProbeTests(unittest.TestCase):
         summary = probe.summary()
         self.assertIn("история запросов=0, ответов=1, связано по seq=0, message.id=1", summary)
         self.assertIn("новых push кадров=0, message.id=0, с chatId=0", summary)
+
+    def test_websocket_push_then_history_after_restart_matches(self):
+        from pathlib import Path
+        folder = Path(tempfile.mkdtemp(prefix="max-end-to-end-"))
+        first_store = IdStability(folder)
+        try:
+            page = FakePage()
+            first_probe = WebSocketIdProbe(stability=first_store)
+            first_probe.attach(page)
+            ws = FakeSocket("wss://client.oneme.ru/ws")
+            page.connect(ws)
+            ws.receive(frame(pack({
+                "chatId": 888,
+                "message": {"id": 999, "text": "DO_NOT_STORE_CUSTOMER_TEXT"}
+            }), opcode=128))
+            self.assertIn("сохранено отпечатков=1", first_probe.summary())
+            first_store.close()
+            second_store = IdStability(folder)
+            try:
+                page2 = FakePage()
+                second_probe = WebSocketIdProbe(stability=second_store)
+                second_probe.attach(page2)
+                ws2 = FakeSocket("wss://client.oneme.ru/ws")
+                page2.connect(ws2)
+                ws2.send(frame(pack({"chatId": 888}), opcode=49))
+                incoming = bytearray(frame(pack({
+                    "messages": [{"id": 999, "text": "DO_NOT_STORE_CUSTOMER_TEXT"}]
+                }), opcode=49))
+                incoming[1] = 1
+                ws2.receive(bytes(incoming))
+                result = second_probe.summary()
+                self.assertIn("связано по seq=1", result)
+                self.assertIn("совпадений после перезапуска=1", result)
+                self.assertNotIn("DO_NOT_STORE", result)
+                second_store.close()
+            except Exception:
+                second_store.close()
+                raise
+        finally:
+            shutil.rmtree(folder)
 
     def test_does_not_interfere_with_page_handlers(self):
         probe = WebSocketIdProbe()
