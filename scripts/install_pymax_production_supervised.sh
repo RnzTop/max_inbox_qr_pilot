@@ -40,7 +40,7 @@ mkdir -p "$local_store"
 stage="$(mktemp -d "$local_store/.max_pymax_inbox.XXXXXXXX")"
 trap 'rm -rf -- "$stage"' EXIT
 base="https://raw.githubusercontent.com/RnzTop/max_inbox_qr_pilot/$REF/max_pymax_inbox"
-for f in Dockerfile config.yaml run.sh app.py bot_api.py inbox_db.py processor.py README.md DOCS.md; do
+for f in Dockerfile config.yaml run.sh app.py bot_api.py inbox_db.py processor.py callbacks.py README.md DOCS.md; do
   curl --fail --silent --show-error --location --retry 3 --max-time 60 \
     "$base/$f" -o "$stage/$f"
 done
@@ -51,21 +51,21 @@ for f in russian_trusted_root.pem russian_trusted_sub.pem; do
 done
 
 python3 -m py_compile "$stage/app.py" "$stage/bot_api.py" \
-  "$stage/inbox_db.py" "$stage/processor.py"
+  "$stage/inbox_db.py" "$stage/processor.py" "$stage/callbacks.py"
 python3 - "$stage/config.yaml" <<'PY'
 import json
 import sys
 with open(sys.argv[1], encoding="utf-8") as fp:
     cfg = json.load(fp)
 assert cfg["slug"] == "max_pymax_inbox"
-assert cfg["version"] == "1.0.0-rc1"
+assert cfg["version"] == "1.0.0-rc2"
 assert cfg["boot"] == "auto"
 assert cfg["arch"] == ["aarch64"]
 assert set(cfg["options"]) == {"bot_token", "work_chat_id"}
 PY
 
 chmod 755 "$stage" "$stage/run.sh"
-chmod 644 "$stage"/{Dockerfile,config.yaml,app.py,bot_api.py,inbox_db.py,processor.py,README.md,DOCS.md}
+chmod 644 "$stage"/{Dockerfile,config.yaml,app.py,bot_api.py,inbox_db.py,processor.py,callbacks.py,README.md,DOCS.md}
 chmod 644 "$stage/certs"/*.pem
 mv -- "$stage" "$install_dir"
 trap - EXIT
