@@ -1,0 +1,23 @@
+{
+  "name": "MAX — Входящие обращения (PyMax)",
+  "version": "1.0.0-rc1",
+  "slug": "max_pymax_inbox",
+  "description": "Отдельный MAX WebClient по QR: новые личные обращения в рабочий чат через MAX Bot API",
+  "arch": [
+    "aarch64"
+  ],
+  "startup": "application",
+  "boot": "manual",
+  "init": true,
+  "ingress": true,
+  "ingress_port": 8099,
+  "panel_icon": "mdi:message-arrow-right",
+  "options": {
+    "bot_token": "",
+    "work_chat_id": ""
+  },
+  "schema": {
+    "bot_token": "password",
+    "work_chat_id": "str"
+  }
+}
