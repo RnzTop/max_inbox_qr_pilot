@@ -274,6 +274,118 @@ def diagnose_page_state(page):
         return "Страница: диагностика временно недоступна."
 
 
+
+
+class WebSocketIdProbe:
+    """Read-only, in-memory counts of ID-shaped fields from MAX WebSocket frames.
+
+    Raw frames, URLs, credentials, message text and identifiers are NEVER
+    printed, retained, uploaded, or written to disk.
+    """
+
+    MAX_HOST = "ws-api.oneme.ru"
+    MAX_FRAME_BYTES = 2 * 1024 * 1024
+
+    def __init__(self):
+        self.counts = {
+            "sockets": 0, "max_sockets": 0,
+            "frames": 0, "json": 0, "binary": 0, "large": 0, "other": 0,
+            "chat_ids": 0, "message_ids": 0, "chat_refs": 0, "pairs": 0,
+            "errors": 0,
+        }
+
+    def attach(self, page):
+        # Attach BEFORE page.goto() so fresh WebSocket handshakes are observed.
+        page.on("websocket", self._on_socket)
+
+    def _on_socket(self, ws):
+        self.counts["sockets"] += 1
+        try:
+            if urlsplit(ws.url).hostname != self.MAX_HOST:
+                return
+            self.counts["max_sockets"] += 1
+            ws.on("framereceived", self._on_frame)
+        except Exception:
+            # Do not expose an exception: WS URLs may contain credentials.
+            self.counts["errors"] += 1
+
+    @staticmethod
+    def _has_id(value):
+        return (type(value) is int
+                or (isinstance(value, str) and bool(value.strip())))
+
+    def _on_frame(self, raw):
+        self.counts["frames"] += 1
+        try:
+            if not isinstance(raw, (str, bytes)) or len(raw) > self.MAX_FRAME_BYTES:
+                self.counts["large"] += 1
+                return
+            if isinstance(raw, bytes):
+                self.counts["binary"] += 1
+                try:
+                    raw = raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    return
+            try:
+                frame = json.loads(raw)
+            except (ValueError, TypeError):
+                self.counts["other"] += 1
+                return
+            if not isinstance(frame, dict):
+                self.counts["other"] += 1
+                return
+            self.counts["json"] += 1
+            data = frame.get("payload")
+            if not isinstance(data, dict):
+                return
+
+            # The protocol can carry a chat ID in the payload, a chat object,
+            # or each element of a chat-list reply. Never copy ID *values*.
+            chat_ref = self._has_id(data.get("chatId"))
+            chat = data.get("chat")
+            if isinstance(chat, dict) and self._has_id(chat.get("id")):
+                chat_ref = True
+                self.counts["chat_ids"] += 1
+            if chat_ref:
+                self.counts["chat_refs"] += 1
+
+            messages = data.get("messages")
+            items = messages[:1000] if isinstance(messages, list) else []
+            single = data.get("message")
+            if isinstance(single, dict):
+                items = items + [single]
+            count = sum(isinstance(m, dict) and self._has_id(m.get("id"))
+                        for m in items)
+            self.counts["message_ids"] += count
+            if chat_ref:
+                self.counts["pairs"] += count
+
+            chats = data.get("chats")
+            if isinstance(chats, list):
+                for item in chats[:1000]:
+                    if not isinstance(item, dict) or not self._has_id(item.get("id")):
+                        continue
+                    self.counts["chat_ids"] += 1
+                    last_message = item.get("lastMessage")
+                    if (isinstance(last_message, dict)
+                            and self._has_id(last_message.get("id"))):
+                        self.counts["message_ids"] += 1
+                        self.counts["pairs"] += 1
+        except Exception:
+            # Errors are counts only; never include raw frame in diagnostics.
+            self.counts["errors"] += 1
+
+    def summary(self):
+        c = {k: min(v, 999999) for k, v in self.counts.items()}
+        return (
+            "WebSocket MAX (счётчики, без значений): "
+            "сокетов={sockets}; MAX-сокетов={max_sockets}; кадров={frames}; "
+            "JSON={json}; двоичных={binary}; слишком больших={large}; "
+            "не-JSON={other}; чатов с id={chat_ids}; "
+            "сообщений с id={message_ids}; кадров с chatId={chat_refs}; "
+            "пар chat+message={pairs}; ошибок проверки={errors}."
+        ).format(**c)
+
 def run(options):
     global status, qr
     if not options.get("test_confirmed"):
@@ -304,12 +416,15 @@ def run(options):
             headless=True, chromium_sandbox=True, accept_downloads=False,
         )
         page = context.pages[0] if context.pages else context.new_page()
+        ws_probe = WebSocketIdProbe()
+        ws_probe.attach(page)
         page.goto("https://web.max.ru/", wait_until="domcontentloaded")
         opened = False
         while True:
             if urlsplit(page.url).hostname != "web.max.ru":
                 raise ValueError("Браузер покинул веб-версию MAX")
             if show_login_if_needed(page):
+                status += " " + ws_probe.summary()
                 opened = False
                 time.sleep(5)
                 continue
@@ -323,14 +438,17 @@ def run(options):
                               "Под диагностикой показан экран встроенного браузера MAX. "
                               "Не присылайте снимок с личными сообщениями. "
                               + diagnose_page_state(page) + " "
-                              + diagnose_message_ids(page))
+                              + diagnose_message_ids(page) + " "
+                              + ws_probe.summary())
                     time.sleep(3)
                     continue
                 target.click(timeout=5000)
                 opened = True
                 time.sleep(2)
             events = snapshot(page)
-            diagnostics = diagnose_message_ids(page) + " " + diagnose_exact_marker_nodes(page)
+            diagnostics = (diagnose_message_ids(page) + " "
+                           + diagnose_exact_marker_nodes(page) + " "
+                           + ws_probe.summary())
             if not events:
                 status = ("В тестовом диалоге ожидаю начальную метку MAX HA TEST и четыре цифры. "
                           + diagnostics)
