@@ -29,6 +29,12 @@ class MockState:
     def add_recovered(self, count):
         pass
 
+    def record_recovery(self, result):
+        pass
+
+    def record_disconnect(self):
+        pass
+
     def update_counts(self, store):
         self.unique = store.unique
         self.duplicates = store.duplicates
