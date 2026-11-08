@@ -209,6 +209,14 @@ class RecoveryTests(unittest.TestCase):
         self.assertIsNone(self.store.history_scan(100, "Test"))
         self.assertEqual(self.store.count(), 0)
 
+    def test_account_change_invalidates_pending_scan(self):
+        self.store.advance_history_cursor(100, "Test", NOW)
+        self.store.start_history_scan(100, "Test", NOW + 5000, NOW - 5000)
+        self.store.bind_chat(101, "Test", 42)
+        self.assertIsNone(self.store.history_cursor(101, "Test"))
+        self.assertIsNone(self.store.history_scan(101, "Test"))
+        self.assertIsNone(self.store.get_binding(100, "Test"))
+
     def test_unverified_chat_is_never_scanned(self):
         client = FakeHistory()
         result = asyncio.run(recover_history(
