@@ -52,9 +52,20 @@ class FakeBot:
     def preflight(self):
         self.bot_id = 999
 
-    def send_text(self, text):
-        type(self).published.append((self.chat_id, text))
+    def send_card(self, text, payload):
+        assert payload.startswith("take:") and len(payload) == 69
+        type(self).published.append((self.chat_id, text, payload))
         return "work-mid-1"
+
+    def get_updates(self, marker=None):
+        return [], 1
+
+    def acknowledge(self, callback_id, note):
+        pass
+
+    def edit_claimed(self, message_id, body, employee_name):
+        pass
+
 
 
 class FakeClient:
