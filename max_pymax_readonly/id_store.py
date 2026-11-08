@@ -41,6 +41,13 @@ class SeenIds:
             scope_mac TEXT NOT NULL,
             scanned_through_ms INTEGER NOT NULL
         )""")
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS history_scan (
+            slot INTEGER PRIMARY KEY CHECK (slot = 1),
+            scope_mac TEXT NOT NULL,
+            snapshot_ms INTEGER NOT NULL,
+            cutoff_ms INTEGER NOT NULL,
+            before_ms INTEGER NOT NULL
+        )""")
         self.conn.commit()
         self.unique = 0
         self.duplicates = 0
@@ -72,6 +79,11 @@ class SeenIds:
             raise ValueError("Cannot bind an unverified test dialog")
         scope = self._binding_mac("pymax-scope-v1", account_id, dialog)
         chat = self._binding_mac("pymax-chat-v1", account_id, dialog, chat_id)
+        old = self.get_binding(account_id, dialog)
+        if old is not None and not hmac.compare_digest(old, chat):
+            # A newly re-paired chat must never inherit the old history cursor.
+            self.conn.execute("DELETE FROM history_progress")
+            self.conn.execute("DELETE FROM history_scan")
         self.conn.execute(
             "INSERT INTO test_binding(slot, scope_mac, chat_mac) VALUES (1, ?, ?) "
             "ON CONFLICT(slot) DO UPDATE SET "
@@ -118,6 +130,74 @@ class SeenIds:
             (scope, timestamp),
         )
         self.conn.commit()
+
+    def _require_history_scope(self, account_id, dialog):
+        if self.get_binding(account_id, dialog) is None:
+            raise ValueError("Test dialogue must be verified before history use")
+        return self._binding_mac("pymax-scope-v1", account_id, dialog)
+
+    def history_scan(self, account_id, dialog):
+        """Private in-progress backward scan; no plaintext chat/message IDs."""
+        scope = self._require_history_scope(account_id, dialog)
+        row = self.conn.execute(
+            "SELECT scope_mac, snapshot_ms, cutoff_ms, before_ms "
+            "FROM history_scan WHERE slot = 1"
+        ).fetchone()
+        if row is None or not hmac.compare_digest(row[0], scope):
+            return None
+        return tuple(row[1:])
+
+    def start_history_scan(self, account_id, dialog, snapshot_ms, cutoff_ms):
+        scope = self._require_history_scope(account_id, dialog)
+        if self.history_scan(account_id, dialog) is not None:
+            raise ValueError("History scan already active")
+        end = int(snapshot_ms)
+        cutoff = int(cutoff_ms)
+        if end <= 0 or cutoff < 0 or cutoff > end:
+            raise ValueError("Invalid scan timestamps")
+        self.conn.execute(
+            "INSERT INTO history_scan(slot, scope_mac, snapshot_ms, "
+            "cutoff_ms, before_ms) VALUES (1, ?, ?, ?, ?)",
+            (scope, end, cutoff, end + 1),
+        )
+        self.conn.commit()
+        return self.history_scan(account_id, dialog)
+
+    def save_history_scan_position(self, account_id, dialog, snapshot_ms, before_ms):
+        scope = self._require_history_scope(account_id, dialog)
+        row = self.history_scan(account_id, dialog)
+        if row is None or row[0] != int(snapshot_ms):
+            raise ValueError("No matching active history scan")
+        next_before = int(before_ms)
+        if not row[1] < next_before < row[2]:
+            raise ValueError("History scan position must advance backwards")
+        self.conn.execute(
+            "UPDATE history_scan SET before_ms = ? "
+            "WHERE slot = 1 AND scope_mac = ?",
+            (next_before, scope),
+        )
+        self.conn.commit()
+
+    def complete_history_scan(self, account_id, dialog, snapshot_ms):
+        scope = self._require_history_scope(account_id, dialog)
+        row = self.history_scan(account_id, dialog)
+        if row is None or row[0] != int(snapshot_ms):
+            raise ValueError("No matching active history scan")
+        prev = self.history_cursor(account_id, dialog)
+        if prev is None or row[0] < prev:
+            raise ValueError("Invalid history completion boundary")
+        # Both changes are committed together. Never lose a checkpoint if
+        # process termination occurs between position and cursor writes.
+        with self.conn:
+            self.conn.execute(
+                "UPDATE history_progress SET scanned_through_ms = ? "
+                "WHERE slot = 1 AND scope_mac = ?",
+                (row[0], scope),
+            )
+            self.conn.execute(
+                "DELETE FROM history_scan WHERE slot = 1 AND scope_mac = ?",
+                (scope,),
+            )
 
     def observe(self, chat_id, message_id):
         if chat_id is None or message_id is None:
