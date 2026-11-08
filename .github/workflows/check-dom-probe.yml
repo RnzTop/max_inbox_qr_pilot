@@ -1,0 +1,24 @@
+name: Validate privacy-safe MAX DOM diagnostics
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Check Python syntax
+        run: python -m compileall -q max_inbox_qr_pilot
+      - name: Test safe diagnostic output
+        run: python -m unittest discover -s max_inbox_qr_pilot/tests -v
