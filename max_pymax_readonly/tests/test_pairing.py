@@ -152,6 +152,7 @@ class PairingTests(unittest.TestCase):
             "STATE": state,
             "logging": logging,
             "secrets": secrets,
+            "asyncio": asyncio,
             "recover_history": fake_recover,
         }
         exec(compile(ast.Module(body=[serve_fn], type_ignores=[]), "app.py", "exec"), namespace)
