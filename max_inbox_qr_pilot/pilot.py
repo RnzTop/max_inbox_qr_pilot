@@ -328,7 +328,8 @@ class WebSocketIdProbe:
             if isinstance(payload, dict) and self._has_id(payload.get("chatId")):
                 self.counts["history_requests"] += 1
                 self._limit_pending()
-                self._history_pending[seq] = payload.get("chatId")
+                self._history_pending[seq] = (
+                    payload.get("chatId") if self.stability else True)
         except Exception:
             self.counts["errors"] += 1
 
