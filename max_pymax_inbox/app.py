@@ -304,6 +304,8 @@ async def serve(token, chat_id):
                             # Claim is already durable; failure to acknowledge
                             # does not justify changing the assigned employee.
                             STATE.record("errors")
+                        # MAX caps callback answers to two per second per chat.
+                        await asyncio.sleep(0.55)
                 if next_marker is not None:
                     store.save_callback_marker(bot_scope, next_marker)
                 await asyncio.sleep(0.4)
