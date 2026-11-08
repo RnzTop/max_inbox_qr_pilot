@@ -1,5 +1,5 @@
 FROM python:3.13-slim-bookworm
-ARG BUILD_VERSION=1.0.0-rc1
+ARG BUILD_VERSION=1.0.0-rc2
 ARG BUILD_ARCH=aarch64
 LABEL io.hass.version="${BUILD_VERSION}" io.hass.type="app" io.hass.arch="${BUILD_ARCH}"
 RUN apt-get update && apt-get install -y --no-install-recommends gosu ca-certificates \
