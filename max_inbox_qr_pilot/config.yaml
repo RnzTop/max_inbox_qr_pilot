@@ -1,6 +1,6 @@
 {
   "name": "MAX — QR-пилот тестового диалога",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "slug": "max_inbox_qr_pilot",
   "description": "Пилот одной тестовой переписки и отдельной закрытой группы MAX",
   "arch": [
