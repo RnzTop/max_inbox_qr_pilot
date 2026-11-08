@@ -273,6 +273,15 @@ class InboxDB:
                 "UPDATE outbox SET state='uncertain' WHERE state='sending'"
             ).rowcount
 
+    def recover_inflight_edits(self):
+        # PUT edits are repeatable and idempotent. Restore after transient
+        # PyMax disconnects without reopening any completed assignment.
+        with self.conn:
+            return self.conn.execute(
+                "UPDATE outbox SET claim_edit='pending' "
+                "WHERE claim_edit='editing'"
+            ).rowcount
+
     def redact_old_sent_bodies(self, days=30):
         cutoff = int(time.time() * 1000) - days * 86_400_000
         with self.conn:
