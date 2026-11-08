@@ -31,9 +31,56 @@ class SeenIds:
         self.conn.execute("""CREATE TABLE IF NOT EXISTS seen (
             pair_hash TEXT PRIMARY KEY, first_seen INTEGER NOT NULL
         )""")
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS test_binding (
+            slot INTEGER PRIMARY KEY CHECK (slot = 1),
+            scope_mac TEXT NOT NULL,
+            chat_mac TEXT NOT NULL
+        )""")
         self.conn.commit()
         self.unique = 0
         self.duplicates = 0
+
+    def _binding_mac(self, purpose, *values):
+        """Fingerprint scoped to one test account and one configured dialog."""
+        digest = hmac.new(self.key, purpose.encode("ascii"), hashlib.sha256)
+        for value in values:
+            encoded = str(value).encode("utf-8")
+            digest.update(len(encoded).to_bytes(4, "big"))
+            digest.update(encoded)
+        return digest.hexdigest()
+
+    def get_binding(self, account_id, dialog):
+        """Get only a keyed digest; never reveal a raw chat ID."""
+        if account_id is None or not dialog:
+            return None
+        scope = self._binding_mac("pymax-scope-v1", account_id, dialog)
+        row = self.conn.execute(
+            "SELECT scope_mac, chat_mac FROM test_binding WHERE slot = 1"
+        ).fetchone()
+        if row is None or not hmac.compare_digest(row[0], scope):
+            return None
+        return row[1]
+
+    def bind_chat(self, account_id, dialog, chat_id):
+        """Persist a verified test-dialog fingerprint in private SQLite."""
+        if account_id is None or chat_id is None or not dialog:
+            raise ValueError("Cannot bind an unverified test dialog")
+        scope = self._binding_mac("pymax-scope-v1", account_id, dialog)
+        chat = self._binding_mac("pymax-chat-v1", account_id, dialog, chat_id)
+        self.conn.execute(
+            "INSERT INTO test_binding(slot, scope_mac, chat_mac) VALUES (1, ?, ?) "
+            "ON CONFLICT(slot) DO UPDATE SET "
+            "scope_mac = excluded.scope_mac, chat_mac = excluded.chat_mac",
+            (scope, chat),
+        )
+        self.conn.commit()
+        return chat
+
+    def is_bound_chat(self, account_id, dialog, chat_id, expected_mac):
+        if expected_mac is None or chat_id is None or account_id is None:
+            return False
+        actual = self._binding_mac("pymax-chat-v1", account_id, dialog, chat_id)
+        return hmac.compare_digest(actual, expected_mac)
 
     def observe(self, chat_id, message_id):
         if chat_id is None or message_id is None:
