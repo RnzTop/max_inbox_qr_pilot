@@ -1,0 +1,10 @@
+{
+  "name":"MAX — QR-пилот тестового диалога",
+  "version":"0.1.0",
+  "slug":"max_inbox_qr_pilot",
+  "description":"Пилот одной тестовой переписки и отдельной закрытой группы MAX",
+  "arch":["aarch64"],"startup":"application","boot":"manual","init":true,
+  "ingress":true,"ingress_port":8099,"panel_icon":"mdi:message-badge",
+  "options":{"test_confirmed":false,"test_account_label":"","test_dialog":"","test_bot_username":"","test_bot_token":"","test_chat_id":""},
+  "schema":{"test_confirmed":"bool","test_account_label":"str","test_dialog":"str","test_bot_username":"str","test_bot_token":"password","test_chat_id":"str"}
+}
