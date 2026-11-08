@@ -283,28 +283,38 @@ class WebSocketIdProbe:
     printed, retained, uploaded, or written to disk.
     """
 
-    MAX_HOST = "ws-api.oneme.ru"
     MAX_FRAME_BYTES = 2 * 1024 * 1024
 
     def __init__(self):
         self.counts = {
-            "sockets": 0, "max_sockets": 0,
+            "sockets": 0, "watched": 0,
+            "oneme_sockets": 0, "max_sockets": 0, "other_sockets": 0,
             "frames": 0, "json": 0, "binary": 0, "large": 0, "other": 0,
+            "protocol_frames": 0,
             "chat_ids": 0, "message_ids": 0, "chat_refs": 0, "pairs": 0,
             "errors": 0,
         }
 
     def attach(self, page):
-        # Attach BEFORE page.goto() so fresh WebSocket handshakes are observed.
+        # Attach BEFORE page.goto(). No interception/modification of traffic.
         page.on("websocket", self._on_socket)
 
     def _on_socket(self, ws):
         self.counts["sockets"] += 1
         try:
-            if urlsplit(ws.url).hostname != self.MAX_HOST:
-                return
-            self.counts["max_sockets"] += 1
+            host = (urlsplit(ws.url).hostname or "").lower()
+            if host == "oneme.ru" or host.endswith(".oneme.ru"):
+                self.counts["oneme_sockets"] += 1
+            elif host == "max.ru" or host.endswith(".max.ru"):
+                self.counts["max_sockets"] += 1
+            else:
+                self.counts["other_sockets"] += 1
+
+            # One WebSocket was previously detected but was not hosted at the
+            # single hard-coded hostname. Observe all sockets initiated by the
+            # already-scoped web.max.ru page, without storing raw frames/URLs.
             ws.on("framereceived", self._on_frame)
+            self.counts["watched"] += 1
         except Exception:
             # Do not expose an exception: WS URLs may contain credentials.
             self.counts["errors"] += 1
@@ -335,9 +345,14 @@ class WebSocketIdProbe:
                 self.counts["other"] += 1
                 return
             self.counts["json"] += 1
+            # Only recognize MAX-shaped protocol envelopes, not arbitrary
+            # telemetry that happens to have "id" or "messages" keys.
+            if type(frame.get("opcode")) is not int or type(frame.get("cmd")) is not int:
+                return
             data = frame.get("payload")
             if not isinstance(data, dict):
                 return
+            self.counts["protocol_frames"] += 1
 
             # The protocol can carry a chat ID in the payload, a chat object,
             # or each element of a chat-list reply. Never copy ID *values*.
@@ -379,8 +394,10 @@ class WebSocketIdProbe:
         c = {k: min(v, 999999) for k, v in self.counts.items()}
         return (
             "WebSocket MAX (счётчики, без значений): "
-            "сокетов={sockets}; MAX-сокетов={max_sockets}; кадров={frames}; "
-            "JSON={json}; двоичных={binary}; слишком больших={large}; "
+            "сокетов={sockets}; наблюдаемых={watched}; "
+            "адреса oneme={oneme_sockets}, max={max_sockets}, другие={other_sockets}; "
+            "кадров={frames}; JSON={json}; протокол MAX={protocol_frames}; "
+            "двоичных={binary}; слишком больших={large}; "
             "не-JSON={other}; чатов с id={chat_ids}; "
             "сообщений с id={message_ids}; кадров с chatId={chat_refs}; "
             "пар chat+message={pairs}; ошибок проверки={errors}."
