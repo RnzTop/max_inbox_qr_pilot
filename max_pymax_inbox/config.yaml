@@ -7,7 +7,7 @@
     "aarch64"
   ],
   "startup": "application",
-  "boot": "manual",
+  "boot": "auto",
   "init": true,
   "ingress": true,
   "ingress_port": 8099,
