@@ -99,7 +99,7 @@ class Panel(BaseHTTPRequestHandler):
                 f'обрывов MAX: {state["disconnects"]}; '
                 f'ошибок: {state["errors"]}</p>'
                 '<p>Содержимое обращений хранится локально в /data. '
-                'Данные в Home Assistant не передаются. '
+                'В события и сущности Home Assistant обращения не публикуются. '
                 'QR и токены не пересылайте.</p>'
                 f'{image}</html>'
             ).encode("utf-8")
