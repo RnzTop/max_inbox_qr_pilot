@@ -199,7 +199,7 @@ class SeenIds:
                 (scope,),
             )
 
-    def observe(self, chat_id, message_id):
+    def observe(self, chat_id, message_id, *, count_duplicate=True):
         if chat_id is None or message_id is None:
             return False
         # Canonical string form; no string/number precision loss for large IDs.
@@ -217,7 +217,7 @@ class SeenIds:
         fresh = result.rowcount == 1
         if fresh:
             self.unique += 1
-        else:
+        elif count_duplicate:
             self.duplicates += 1
         return fresh
 
