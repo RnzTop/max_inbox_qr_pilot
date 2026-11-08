@@ -265,8 +265,12 @@ def run(options):
             if not opened:
                 target, matches = find_test_dialog(page, dialog)
                 if target is None:
-                    qr = b""
+                    # Keep the screen visible only to the local Home Assistant
+                    # ingress panel. Never log, save, or upload the image.
+                    qr = page.screenshot()
                     status = (f"Тестовый чат не найден: точных совпадений {matches}. "
+                              "Под диагностикой показан экран встроенного браузера MAX. "
+                              "Не присылайте снимок с личными сообщениями. "
                               + diagnose_page_state(page) + " "
                               + diagnose_message_ids(page))
                     time.sleep(3)
