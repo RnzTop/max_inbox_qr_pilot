@@ -1,6 +1,6 @@
 {
   "name": "MAX — PyMax только тест (без отправки)",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "slug": "max_pymax_readonly",
   "description": "Экспериментальный облегчённый WebSocket клиент MAX с QR-входом, только тестовые метки",
   "arch": [
