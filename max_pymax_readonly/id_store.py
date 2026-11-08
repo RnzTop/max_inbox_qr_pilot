@@ -79,9 +79,15 @@ class SeenIds:
             raise ValueError("Cannot bind an unverified test dialog")
         scope = self._binding_mac("pymax-scope-v1", account_id, dialog)
         chat = self._binding_mac("pymax-chat-v1", account_id, dialog, chat_id)
-        old = self.get_binding(account_id, dialog)
-        if old is not None and not hmac.compare_digest(old, chat):
-            # A newly re-paired chat must never inherit the old history cursor.
+        prior = self.conn.execute(
+            "SELECT scope_mac, chat_mac FROM test_binding WHERE slot = 1"
+        ).fetchone()
+        if prior is not None and (
+            not hmac.compare_digest(prior[0], scope)
+            or not hmac.compare_digest(prior[1], chat)
+        ):
+            # Changing the test account, configured dialog or selected chat
+            # must invalidate the older history checkpoints.
             self.conn.execute("DELETE FROM history_progress")
             self.conn.execute("DELETE FROM history_scan")
         self.conn.execute(
