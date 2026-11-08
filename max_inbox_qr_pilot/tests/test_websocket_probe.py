@@ -1,6 +1,7 @@
 """Synthetic WebSocket frames; no live MAX session, secrets or Playwright."""
 import ast
 import json
+import sys
 import unittest
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -12,7 +13,10 @@ probe_cls = next(
     node for node in tree.body
     if isinstance(node, ast.ClassDef) and node.name == "WebSocketIdProbe"
 )
-scope = {"json": json, "urlsplit": urlsplit}
+sys.path.insert(0, str(SCRIPT.parent))
+from ws_binary_probe import scan_binary_frame
+
+scope = {"json": json, "urlsplit": urlsplit, "scan_binary_frame": scan_binary_frame}
 exec(compile(ast.Module(body=[probe_cls], type_ignores=[]), str(SCRIPT), "exec"), scope)
 WebSocketIdProbe = scope["WebSocketIdProbe"]
 
@@ -92,14 +96,16 @@ class WebSocketProbeTests(unittest.TestCase):
         ws = FakeSocket("wss://ws-api.oneme.ru/websocket")
         probe._on_socket(ws)
         ws.receive(b"\xff\xfe\x81")
-        ws.receive(b'{"payload":{"message":{"id":"secret"}}}')
+        ws.receive('{"cmd":0,"opcode":128,"payload":{"chatId":1,"message":{"id":"secret"}}}')
         ws.receive("not json with SECRET_URL")
         ws.receive(None)
         self.assertIn("кадров=4", probe.summary())
-        self.assertIn("двоичных=2", probe.summary())
-        self.assertIn("JSON=1", probe.summary())
-        self.assertIn("не-JSON=1", probe.summary())
-        self.assertIn("слишком больших=1", probe.summary())
+        self.assertIn("двоичных=1;", probe.summary())
+        self.assertIn(" JSON=1;", probe.summary())
+        self.assertIn("протокол MAX=1;", probe.summary())
+        self.assertIn("не-JSON=1;", probe.summary())
+        self.assertIn("неизвестный заголовок=1;", probe.summary())
+        self.assertIn("слишком больших=1;", probe.summary())
         self.assertNotIn("secret", probe.summary())
 
     def test_protocol_field_locations_need_parent_chat_for_pair(self):
