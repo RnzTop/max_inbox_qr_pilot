@@ -108,7 +108,7 @@ class RecoveryTests(unittest.TestCase):
         )
         self.assertTrue(complete.complete)
         self.assertEqual(self.store.count(), 20)
-        self.assertEqual(self.store.history_cursor(100, "Test"), NOW + 31_000)
+        self.assertEqual(self.store.history_cursor(100, "Test"), NOW + 30_000)
 
     def test_errors_never_advance_history_cursor(self):
         self.store.advance_history_cursor(100, "Test", NOW)
