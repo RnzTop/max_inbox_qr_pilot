@@ -11,7 +11,7 @@ class SafeIntegrationTests(unittest.TestCase):
     def test_config_has_only_two_required_credentials(self):
         options = json.loads((ROOT / "config.yaml").read_text())
         self.assertEqual(options["slug"], "max_pymax_inbox")
-        self.assertEqual(options["boot"], "manual")
+        self.assertEqual(options["boot"], "auto")
         self.assertEqual(options["arch"], ["aarch64"])
         self.assertEqual(set(options["options"]), {"bot_token", "work_chat_id"})
         self.assertEqual(options["schema"]["bot_token"], "password")
