@@ -15,6 +15,7 @@ probe_cls = next(
 )
 sys.path.insert(0, str(SCRIPT.parent))
 from ws_binary_probe import scan_binary_frame
+from test_ws_binary_probe import pack, frame
 
 scope = {"json": json, "urlsplit": urlsplit, "scan_binary_frame": scan_binary_frame}
 exec(compile(ast.Module(body=[probe_cls], type_ignores=[]), str(SCRIPT), "exec"), scope)
@@ -42,6 +43,11 @@ class FakeSocket:
 
     def receive(self, payload):
         callback = self.events.get("framereceived")
+        if callback:
+            callback(payload)
+
+    def send(self, payload):
+        callback = self.events.get("framesent")
         if callback:
             callback(payload)
 
@@ -137,6 +143,59 @@ class WebSocketProbeTests(unittest.TestCase):
         self.assertIn("пар chat+message=1", summary)
         self.assertNotIn("SECRET", summary)
         self.assertNotIn("123", summary)
+
+    def test_classifies_live_history_and_login_without_extracting_ids(self):
+        probe = WebSocketIdProbe()
+        page = FakePage()
+        probe.attach(page)
+        ws = FakeSocket("wss://client.oneme.ru/websocket")
+        page.connect(ws)
+
+        # This binary history request contains a chatId, but we retain only
+        # its packet seq number as correlation state, not the chatId value.
+        request = frame(pack({"chatId": 811, "getMessages": 1}),
+                        opcode=49)
+        ws.send(request)
+        self.assertEqual(len(probe._history_pending), 1)
+        self.assertTrue(all(x is True for x in probe._history_pending.values()))
+
+        # Response with the same seq, even without a chatId of its own.
+        history = bytearray(frame(pack({
+            "messages": [{"id": 833, "text": "SECRET_PRIVATE_TEXT"}]
+        }), opcode=49))
+        history[1] = 1
+        ws.receive(bytes(history))
+
+        login = bytearray(frame(pack({
+            "chats": [{"id": 881, "lastMessage": {"id": 882}}]
+        }), opcode=19))
+        login[1] = 1
+        ws.receive(bytes(login))
+
+        ws.receive(frame(pack({
+            "chatId": 991, "message": {"id": 992, "text": "SECRET_TEXT"}
+        }), opcode=128))
+
+        summary = probe.summary()
+        self.assertIn("история запросов=1, ответов=1, связано по seq=1, message.id=1", summary)
+        self.assertIn("LOGIN кадров=1, чатов=1", summary)
+        self.assertIn("новых push кадров=1, message.id=1, с chatId=1", summary)
+        self.assertEqual(probe._history_pending, {})
+        self.assertNotIn("SECRET", summary)
+        self.assertNotIn("991", summary)
+
+    def test_message_id_in_history_is_not_live_event(self):
+        probe = WebSocketIdProbe()
+        ws = FakeSocket("wss://service.oneme.ru/socket")
+        probe._on_socket(ws)
+        binary = bytearray(frame(pack({
+            "messages": [{"id": 555}]
+        }), opcode=49))
+        binary[1] = 1
+        ws.receive(bytes(binary))
+        summary = probe.summary()
+        self.assertIn("история запросов=0, ответов=1, связано по seq=0, message.id=1", summary)
+        self.assertIn("новых push кадров=0, message.id=0, с chatId=0", summary)
 
     def test_does_not_interfere_with_page_handlers(self):
         probe = WebSocketIdProbe()
