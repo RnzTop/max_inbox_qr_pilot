@@ -117,6 +117,64 @@ def show_login_if_needed(page):
     return False
 
 
+
+def diagnose_message_ids(page):
+    """Check DOM attribute PRESENCE only; never read message or ID values."""
+    try:
+        probe = page.evaluate("""() => {
+            const bubbles = Array.from(document.querySelectorAll('.bubbleContent')).slice(0, 100);
+            const keys = ['mid', 'chat', 'seq', 'index', 'html_id'];
+            const found = {mid: 0, chat: 0, seq: 0, index: 0, html_id: 0};
+            for (const bubble of bubbles) {
+                const seen = new Set();
+                function inspect(node) {
+                    for (const attr of node.attributes || []) {
+                        if (!attr.value) continue;
+                        const name = attr.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+                        if (['mid', 'datamid', 'messageid', 'datamessageid',
+                             'msgid', 'datamsgid'].includes(name)) seen.add('mid');
+                        if (['chatid', 'datachatid', 'peerid', 'datapeerid',
+                             'dialogid', 'datadialogid'].includes(name)) seen.add('chat');
+                        if (['seq', 'dataseq', 'sequence', 'datasequence'].includes(name)) seen.add('seq');
+                        if (name === 'dataindex') seen.add('index');
+                        if (name === 'id') seen.add('html_id');
+                    }
+                }
+                let parent = bubble;
+                for (let level = 0; level < 8 && parent; level++, parent = parent.parentElement) {
+                    inspect(parent);
+                }
+                const inside = bubble.querySelectorAll('*');
+                for (let i = 0; i < Math.min(inside.length, 50); i++) inspect(inside[i]);
+                for (const name of keys) if (seen.has(name)) found[name]++;
+            }
+            const hasChatAttributeElsewhere = !!document.querySelector(
+                '[data-chat-id], [data-chatid], [chat-id], [data-peer-id], [data-dialog-id]'
+            );
+            const route = location.pathname !== '/' || !!location.search || !!location.hash;
+            return {bubbles: bubbles.length, ...found, hasChatAttributeElsewhere, route};
+        }""")
+        if not isinstance(probe, dict):
+            return "DOM: данные диагностики недоступны."
+        return (
+            "DOM (только наличие атрибутов, не ID): "
+            "сообщений={bubbles}; mid={mid}; chat={chat}; seq={seq}; "
+            "data-index={index}; обычный HTML id={html_id}; "
+            "chat-атрибут вне сообщения={outside}; маршрут в URL={route}."
+        ).format(
+            bubbles=int(probe.get("bubbles", 0)),
+            mid=int(probe.get("mid", 0)),
+            chat=int(probe.get("chat", 0)),
+            seq=int(probe.get("seq", 0)),
+            index=int(probe.get("index", 0)),
+            html_id=int(probe.get("html_id", 0)),
+            outside="да" if probe.get("hasChatAttributeElsewhere") else "нет",
+            route="да" if probe.get("route") else "нет",
+        )
+    except Exception:
+        # The app must keep running even if the DOM changes while probing.
+        return "DOM: диагностика временно недоступна."
+
 def run(options):
     global status, qr
     if not options.get("test_confirmed"):
@@ -159,25 +217,24 @@ def run(options):
             if not opened:
                 target, matches = find_test_dialog(page, dialog)
                 if target is None:
-                    status = (f"Диагностика MAX: точных видимых совпадений имени {matches}. "
-                              f"Ниже показан снимок страницы, открытой внутри дополнения. "
-                              f"Если виден экран входа — войдите по QR; если ошибка — "
-                              f"проверьте доступность MAX из контейнера.")
-                    # Diagnostic image stays in the ingress-protected panel; it is
-                    # not saved to disk or sent to a remote diagnostic service.
-                    qr = page.screenshot()
+                    qr = b""
+                    status = (f"Тестовый чат не найден: точных совпадений {matches}. "
+                              "Безопасная диагностика: " + diagnose_message_ids(page))
                     time.sleep(3)
                     continue
                 target.click(timeout=5000)
                 opened = True
                 time.sleep(2)
             events = snapshot(page)
+            diagnostics = diagnose_message_ids(page)
             if not events:
-                status = "В тестовом диалоге ожидаю начальную метку MAX HA TEST и четыре цифры."
+                status = ("В тестовом диалоге ожидаю начальную метку MAX HA TEST и четыре цифры. "
+                          + diagnostics)
                 time.sleep(2)
                 continue
             cursor.observe(events)
-            status = "Пилот слушает тестовый диалог. Отправьте новую метку MAX HA TEST с цифрами."
+            status = ("Пилот слушает тестовый диалог. Отправьте новую метку MAX HA TEST с цифрами. "
+                      + diagnostics)
             if group.send_one():
                 time.sleep(0.6)
             if marker is not None:
