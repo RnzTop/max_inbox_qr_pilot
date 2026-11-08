@@ -36,7 +36,7 @@ class Panel(BaseHTTPRequestHandler):
             payload, content_type = image, "image/png"
         else:
             text = escape(status)
-            picture = '<img src="./qr.png" alt="QR входа MAX">' if image else ""
+            picture = '<img src="./qr.png" alt="Страница браузера MAX">' if image else ""
             payload = (f'<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="5">'
                        f'<h1>MAX — QR-пилот</h1><p>{text}</p>{picture}').encode()
             content_type = "text/html; charset=utf-8"
@@ -159,9 +159,13 @@ def run(options):
             if not opened:
                 target, matches = find_test_dialog(page, dialog)
                 if target is None:
-                    status = (f"Чат не найден в браузере дополнения: точных видимых совпадений "
-                              f"имени {matches}; нужно ровно одно. Проверьте вход через QR "
-                              f"и видимость чата в этом аккаунте MAX.")
+                    status = (f"Диагностика MAX: точных видимых совпадений имени {matches}. "
+                              f"Ниже показан снимок страницы, открытой внутри дополнения. "
+                              f"Если виден экран входа — войдите по QR; если ошибка — "
+                              f"проверьте доступность MAX из контейнера.")
+                    # Diagnostic image stays in the ingress-protected panel; it is
+                    # not saved to disk or sent to a remote diagnostic service.
+                    qr = page.screenshot()
                     time.sleep(3)
                     continue
                 target.click(timeout=5000)
