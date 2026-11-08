@@ -116,7 +116,7 @@ class _MsgpackStructuralProbe:
         out = {} if capture else None
         for _ in range(n):
             key = self.item(depth + 1, capture, key=True)
-            wanted = capture and key in KEEP
+            wanted = capture and isinstance(key, str) and key in KEEP
             value = self.item(depth + 1, wanted)
             if wanted:
                 out[key] = value
