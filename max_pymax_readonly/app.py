@@ -134,40 +134,51 @@ async def serve(dialog):
         ),
         qr_provider=IngressQr(),
     )
-    target_chat_id = None
+    saved_chat_mac = None
     own_user_id = None
     # Private 128-bit challenge scoped to this process. Never saved or logged.
     pairing_marker = "MAX HA PAIR " + secrets.token_hex(16).upper()
 
     @client.on_start()
     async def started(connected):
-        nonlocal target_chat_id, own_user_id
-        # The first MAX sync may only contain recent chats. Never fuzzy-match.
-        chats = connected.chats or []
-        matches = [c for c in chats if c.is_dialog and c.title == dialog]
-        target_chat_id = matches[0].id if len(matches) == 1 else None
+        nonlocal saved_chat_mac, own_user_id
+        # A personal chat often has no title in PyMax. Prefer the previously
+        # authenticated HMAC binding, scoped to this account and dialog setting.
         profile = getattr(connected, "me", None)
         contact = getattr(profile, "contact", None)
         own_user_id = getattr(contact, "id", None)
         STATE.set_qr(b"")
+        saved_chat_mac = None
         if own_user_id is None:
-            target_chat_id = None
             STATE.set_status("Подключено к MAX, но ID тестового аккаунта не определён. Приём отключён.")
-        elif target_chat_id is None:
+            return
+        saved_chat_mac = store.get_binding(own_user_id, dialog)
+        if saved_chat_mac is not None:
             STATE.set_status(
-                "MAX подключён. По имени тестовый диалог не найден "
-                f"(совпадений {len(matches)}). "
-                "Для безопасной привязки отправьте из другого тестового "
-                "аккаунта в НУЖНЫЙ личный диалог точное сообщение: "
-                + pairing_marker
+                "MAX подключён. Сохранённая привязка тестового диалога "
+                "восстановлена. Ожидаю новую метку MAX HA TEST."
             )
-        else:
-            STATE.set_status("Тестовый диалог найден. Ожидаю новую входящую метку MAX HA TEST.")
+            return
+        chats = connected.chats or []
+        matches = [c for c in chats if c.is_dialog and c.title == dialog]
+        if len(matches) == 1:
+            saved_chat_mac = store.bind_chat(own_user_id, dialog, matches[0].id)
+            STATE.set_status(
+                "Тестовый диалог найден и привязан. Ожидаю MAX HA TEST."
+            )
+            return
+        STATE.set_status(
+            "MAX подключён, тестовый диалог не выбран "
+            f"(точных совпадений {len(matches)}). "
+            "Отправьте из другого тестового аккаунта в нужный личный диалог "
+            "точное сообщение: " + pairing_marker
+        )
 
     @client.on_disconnect()
     async def disconnected(error, reconnect, delay):
-        nonlocal target_chat_id
-        target_chat_id = None
+        nonlocal saved_chat_mac, own_user_id
+        saved_chat_mac = None
+        own_user_id = None
         STATE.set_qr(b"")
         STATE.set_status(
             "Соединение с MAX потеряно. Ожидаю переподключения."
@@ -176,23 +187,43 @@ async def serve(dialog):
 
     @client.on_message()
     async def got_message(message, connected):
-        nonlocal target_chat_id
+        nonlocal saved_chat_mac
         # Fail closed until the logged-in test account identity is verified.
         if own_user_id is None or message.chat_id is None:
             return
         if message.sender is None or message.sender == own_user_id:
             return
-        if target_chat_id is None:
-            # Only the exact private challenge may select a dialogue.
-            # No other messages/IDs/names are retained at this stage.
-            if message.text == pairing_marker:
-                target_chat_id = message.chat_id
-                STATE.set_status(
-                    "Тестовый диалог привязан. Теперь отправьте из этого "
-                    "диалога новую метку MAX HA TEST 8361."
+        if saved_chat_mac is None:
+            # The private one-time challenge can bind only a verified personal
+            # chat. No raw chat IDs, contact names or messages are persisted.
+            if message.text != pairing_marker:
+                return
+            try:
+                chat = next(
+                    (c for c in (connected.chats or [])
+                     if c.id == message.chat_id), None
                 )
+                if chat is None:
+                    chat = await connected.get_chat(message.chat_id)
+            except Exception:
+                STATE.set_status(
+                    "Не удалось проверить тип тестового диалога. "
+                    "Привязка не выполнена. Повторите метку позже."
+                )
+                return
+            if not getattr(chat, "is_dialog", False):
+                return
+            saved_chat_mac = store.bind_chat(
+                own_user_id, dialog, message.chat_id
+            )
+            STATE.set_status(
+                "Тестовый диалог привязан и сохранён. Отправьте новую "
+                "метку MAX HA TEST 8362."
+            )
             return
-        if message.chat_id != target_chat_id:
+        if not store.is_bound_chat(
+            own_user_id, dialog, message.chat_id, saved_chat_mac
+        ):
             return
         if not MARKER.fullmatch(message.text or ""):
             return
