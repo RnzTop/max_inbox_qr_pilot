@@ -46,14 +46,14 @@ with open(sys.argv[2], encoding="utf-8") as f:
     installed = json.load(f)
 assert updated["slug"] == "max_pymax_readonly"
 assert installed["slug"] == "max_pymax_readonly"
-assert updated["version"] == "0.0.4", updated["version"]
+assert updated["version"] == "0.0.5", updated["version"]
 assert updated["boot"] == "manual"
 PY
 
 backups="$supervisor_data/.max_pymax_readonly_source_backups"
 mkdir -p "$backups"
 chmod 700 "$backups"
-backup="$(mktemp -d "$backups/before-0.0.3.XXXXXXXX")"
+backup="$(mktemp -d "$backups/before-0.0.5.XXXXXXXX")"
 chmod 700 "$backup"
 for f in "${files[@]}"; do
   if [ -f "$install_dir/$f" ]; then
@@ -65,7 +65,7 @@ done
 for f in "${files[@]}"; do
   install -m 644 -- "$stage/$f" "$install_dir/$f"
 done
-echo "Исходники PyMax 0.0.3 обновлены: $install_dir"
+echo "Исходники PyMax 0.0.5 обновлены: $install_dir"
 echo "Резервная копия: $backup"
 echo "Данные /data, сессия MAX и существующие метки не изменены."
 echo "Сборка и запуск не выполнялись."
