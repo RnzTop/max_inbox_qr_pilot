@@ -32,6 +32,22 @@ class MockState:
 
 
 class FakeStore:
+    paired = None
+
+    def get_binding(self, owner, dialog):
+        if type(self).paired and type(self).paired[:2] == (owner, dialog):
+            return "paired-digest"
+        return None
+
+    def bind_chat(self, owner, dialog, chat):
+        type(self).paired = (owner, dialog, chat)
+        return "paired-digest"
+
+    def is_bound_chat(self, owner, dialog, chat, digest):
+        return digest == "paired-digest" and type(self).paired == (
+            owner, dialog, chat
+        )
+
     def __init__(self, directory):
         self.seen = set()
         self.unique = 0
@@ -71,14 +87,23 @@ class FakeClient:
             return callback
         return deco
 
+    async def get_chat(self, chat_id):
+        return SimpleNamespace(id=chat_id, is_dialog=(chat_id == 42))
+
     async def start(self):
         await self._started(self)
-        challenge = self.state.statuses[-1].split("точное сообщение: ", 1)[1]
-        assert re.fullmatch(r"MAX HA PAIR [0-9A-F]{32}", challenge)
         msg = lambda chat, sender, text, mid: SimpleNamespace(
             chat_id=chat, sender=sender, text=text, id=mid,
         )
+        if "Сохранённая привязка" in self.state.statuses[-1]:
+            await self._message(msg(43, 200, "MAX HA TEST 8362", 17), self)
+            await self._message(msg(42, 200, "MAX HA TEST 8362", 18), self)
+            assert self.state.unique == 1
+            return
+        challenge = self.state.statuses[-1].split("точное сообщение: ", 1)[1]
+        assert re.fullmatch(r"MAX HA PAIR [0-9A-F]{32}", challenge)
         # No text including a subset of challenge may bind the dialog.
+        await self._message(msg(43, 200, challenge, 9), self)
         await self._message(msg(42, 200, challenge + " ", 10), self)
         await self._message(msg(42, 100, challenge, 11), self)
         await self._message(msg(42, 200, "MAX HA TEST 8361", 12), self)
@@ -98,11 +123,16 @@ class FakeClient:
 
 class PairingTests(unittest.TestCase):
     def test_only_exact_challenge_binds_one_personal_chat(self):
+        FakeStore.paired = None
         state = MockState()
         class BoundClient(FakeClient):
+            current_state = None
+
             def __init__(self, **kw):
                 super().__init__(**kw)
-                self.state = state
+                self.state = type(self).current_state
+
+        BoundClient.current_state = state
 
         namespace = {
             "DATA": Path("/tmp"),
@@ -119,6 +149,14 @@ class PairingTests(unittest.TestCase):
         asyncio.run(namespace["serve"]("Expected test name"))
         self.assertEqual((state.unique, state.duplicates), (1, 1))
         self.assertNotIn("MAX HA PAIR", state.statuses[-1])
+        # A new process restores the saved HMAC and never asks for pairing.
+        state2 = MockState()
+        BoundClient.current_state = state2
+        namespace["STATE"] = state2
+        exec(compile(ast.Module(body=[serve_fn], type_ignores=[]), "app.py", "exec"), namespace)
+        asyncio.run(namespace["serve"]("Expected test name"))
+        self.assertEqual(state2.unique, 1)
+        self.assertNotIn("MAX HA PAIR", " ".join(state2.statuses))
 
 
 if __name__ == "__main__":
