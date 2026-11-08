@@ -1,0 +1,29 @@
+name: Validate isolated PyMax read-only test addon
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Compile addon Python files
+        run: python -m compileall -q max_pymax_readonly
+      - name: Test test-only gating, privacy and local dedupe
+        run: python -m unittest discover -s max_pymax_readonly/tests -v
+      - name: Build isolated local addon Docker image
+        run: docker build --build-arg BUILD_VERSION=0.0.2 --build-arg BUILD_ARCH=amd64 -t max-pymax-readonly:test ./max_pymax_readonly
+      - name: Verify pinned PyMax QR-capable client inside image
+        run: |
+          docker run --rm --entrypoint python max-pymax-readonly:test -c 'from io import BytesIO; import qrcode; from pymax import ExtraConfig, WebClient; from pymax.auth.qr import QrAuthFlow; from qrcode.image.svg import SvgPathImage; c = ExtraConfig(telemetry=False, relogin=False, password_max_attempts=0); assert not c.telemetry; q = qrcode.QRCode(); q.add_data("https://qr.example.invalid/test"); q.make(fit=True); f = BytesIO(); q.make_image(image_factory=SvgPathImage).save(f); assert b"<svg" in f.getvalue()[:300]; print("PyMax QR rendering OK")'

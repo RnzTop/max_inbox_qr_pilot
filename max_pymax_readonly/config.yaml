@@ -1,0 +1,25 @@
+{
+  "name": "MAX — PyMax только тест (без отправки)",
+  "version": "0.0.5",
+  "slug": "max_pymax_readonly",
+  "description": "Экспериментальный облегчённый WebSocket клиент MAX с QR-входом, только тестовые метки",
+  "arch": [
+    "aarch64"
+  ],
+  "startup": "application",
+  "boot": "manual",
+  "init": true,
+  "ingress": true,
+  "ingress_port": 8099,
+  "panel_icon": "mdi:message-check",
+  "options": {
+    "test_confirmed": false,
+    "test_account_label": "",
+    "test_dialog": ""
+  },
+  "schema": {
+    "test_confirmed": "bool",
+    "test_account_label": "str",
+    "test_dialog": "str"
+  }
+}
