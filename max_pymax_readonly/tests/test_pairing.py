@@ -19,6 +19,7 @@ class MockState:
         self.statuses = []
         self.unique = 0
         self.duplicates = 0
+        self.disconnects = 0
 
     def set_status(self, msg):
         self.statuses.append(msg)
@@ -33,7 +34,7 @@ class MockState:
         pass
 
     def record_disconnect(self):
-        pass
+        self.disconnects += 1
 
     def update_counts(self, store):
         self.unique = store.unique
@@ -105,6 +106,12 @@ class FakeClient:
             chat_id=chat, sender=sender, text=text, id=mid,
         )
         if FakeStore.paired and "История тестового чата проверена" in self.state.statuses[-1]:
+            # Simulate a temporary websocket outage and PyMax automatic
+            # on_disconnect/on_start cycle; pairing survives in SQLite.
+            await self._disconnected(OSError("mock network down"), True, 10)
+            assert self.state.disconnects == 1
+            await self._started(self)
+            assert "История тестового чата проверена" in self.state.statuses[-1]
             await self._message(msg(43, 200, "MAX HA TEST 8362", 17), self)
             await self._message(msg(42, 200, "MAX HA TEST 8362", 18), self)
             assert self.state.unique == 1
