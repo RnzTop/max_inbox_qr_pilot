@@ -175,6 +175,54 @@ def diagnose_message_ids(page):
         # The app must keep running even if the DOM changes while probing.
         return "DOM: диагностика временно недоступна."
 
+
+def diagnose_page_state(page):
+    """Only return bounded counters and booleans, never URLs or page text."""
+    try:
+        info = page.evaluate("""() => {
+            const body = document.body;
+            const text = (body?.innerText || '');
+            return {
+                ready: document.readyState,
+                elements: document.querySelectorAll('*').length,
+                body_chars: text.length,
+                chat_rows: document.querySelectorAll('button.cell').length,
+                message_bubbles: document.querySelectorAll('.bubbleContent').length,
+                message_indices: document.querySelectorAll('[data-index]').length,
+                chat_editors: document.querySelectorAll('[contenteditable="true"]').length,
+                phone_inputs: document.querySelectorAll('input[type="tel"]').length,
+                qr_canvas: document.querySelectorAll('canvas').length,
+                qr_words: /QR[\s\-‑–]*код|войти\s+в\s+MAX|вход\s+в\s+MAX|сканируйте/i.test(text),
+                root_empty: !body || body.children.length === 0
+            };
+        }""")
+        if not isinstance(info, dict):
+            return "Страница: диагностика недоступна."
+        ready = info.get("ready") if info.get("ready") in ("loading", "interactive", "complete") else "unknown"
+        return (
+            "Страница MAX: загрузка={ready}; DOM-элементов={elements}; "
+            "символов на странице={body_chars}; строк чатов={chat_rows}; "
+            "сообщений по CSS={message_bubbles}; элементов data-index={message_indices}; "
+            "полей ввода чата={chat_editors}; телефонных полей={phone_inputs}; "
+            "canvas={qr_canvas}; текстовый признак входа={qr_words}; "
+            "пустая страница={root_empty}."
+        ).format(
+            ready=ready,
+            elements=min(int(info.get("elements", 0)), 99999),
+            body_chars=min(int(info.get("body_chars", 0)), 99999),
+            chat_rows=min(int(info.get("chat_rows", 0)), 99999),
+            message_bubbles=min(int(info.get("message_bubbles", 0)), 99999),
+            message_indices=min(int(info.get("message_indices", 0)), 99999),
+            chat_editors=min(int(info.get("chat_editors", 0)), 99999),
+            phone_inputs=min(int(info.get("phone_inputs", 0)), 99999),
+            qr_canvas=min(int(info.get("qr_canvas", 0)), 99999),
+            qr_words="да" if info.get("qr_words") else "нет",
+            root_empty="да" if info.get("root_empty") else "нет",
+        )
+    except Exception:
+        return "Страница: диагностика временно недоступна."
+
+
 def run(options):
     global status, qr
     if not options.get("test_confirmed"):
@@ -219,7 +267,8 @@ def run(options):
                 if target is None:
                     qr = b""
                     status = (f"Тестовый чат не найден: точных совпадений {matches}. "
-                              "Безопасная диагностика: " + diagnose_message_ids(page))
+                              + diagnose_page_state(page) + " "
+                              + diagnose_message_ids(page))
                     time.sleep(3)
                     continue
                 target.click(timeout=5000)
