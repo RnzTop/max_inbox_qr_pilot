@@ -52,7 +52,7 @@ async def recover_history(
         return RecoveryResult(error="unverified_dialog")
     if not (1 <= page_size <= PAGE_SIZE and 1 <= max_pages <= MAX_PAGES):
         return RecoveryResult(error="invalid_limit")
-    if not (1 <= request_timeout <= REQUEST_TIMEOUT_SEC):
+    if not (0 < request_timeout <= REQUEST_TIMEOUT_SEC):
         return RecoveryResult(error="invalid_timeout")
 
     now = int(time.time() * 1000) if now_ms is None else int(now_ms)
