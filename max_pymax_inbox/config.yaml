@@ -1,6 +1,6 @@
 {
   "name": "MAX — Входящие обращения (PyMax)",
-  "version": "1.0.0-rc1",
+  "version": "1.0.0-rc2",
   "slug": "max_pymax_inbox",
   "description": "Отдельный MAX WebClient по QR: новые личные обращения в рабочий чат через MAX Bot API",
   "arch": [
