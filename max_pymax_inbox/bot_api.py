@@ -89,6 +89,13 @@ class MaxBotAPI:
                 or chat.get("status") != "active"
                 or chat.get("is_public") is not False):
             raise BotApiError("invalid_destination")
+        membership = self._request(
+            "GET", f"/chats/{self.chat_id}/members/me"
+        )
+        if (membership.get("user_id") != bot_id
+                or membership.get("is_admin") is not True):
+            # MAX does not deliver group updates reliably to non-admin bots.
+            raise BotApiError("bot_not_admin")
         subscriptions = self._request("GET", "/subscriptions")
         if (not isinstance(subscriptions.get("subscriptions"), list)
                 or subscriptions["subscriptions"]):
