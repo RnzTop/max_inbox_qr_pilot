@@ -149,6 +149,20 @@ class RecoveryTests(unittest.TestCase):
         self.assertTrue(fourth.complete)
         self.assertEqual(self.store.count(), 1200)
 
+    def test_stalled_network_times_out_without_losing_scan_cursor(self):
+        self.store.advance_history_cursor(100, "Test", NOW)
+        class HangingHistory:
+            async def fetch_history(self, **kwargs):
+                await asyncio.sleep(1)
+                return []
+        result = self.run_recovery(
+            HangingHistory(), NOW + 100_000, request_timeout=0.01
+        )
+        self.assertFalse(result.complete)
+        self.assertEqual(result.error, "history_request_failed")
+        self.assertEqual(self.store.history_cursor(100, "Test"), NOW)
+        self.assertIsNotNone(self.store.history_scan(100, "Test"))
+
     def test_network_break_mid_scan_preserves_position(self):
         self.store.advance_history_cursor(100, "Test", NOW)
         class FlakyHistory(FakeHistory):
