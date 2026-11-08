@@ -123,7 +123,10 @@ async def serve(dialog):
     client = WebClient(
         work_dir=str(DATA),
         session_name="pymax_session.db",
-        extra_config=ExtraConfig(telemetry=False, log_level="WARNING", reconnect=True),
+        extra_config=ExtraConfig(
+            telemetry=False, log_level="WARNING", reconnect=True,
+            reconnect_delay=10.0, relogin=False, password_max_attempts=0,
+        ),
         qr_provider=IngressQr(),
     )
     target_chat_id = None
@@ -147,11 +150,24 @@ async def serve(dialog):
         else:
             STATE.set_status("Тестовый диалог найден. Ожидаю новую входящую метку MAX HA TEST.")
 
+    @client.on_disconnect()
+    async def disconnected(error, reconnect, delay):
+        nonlocal target_chat_id
+        target_chat_id = None
+        STATE.set_qr(b"")
+        STATE.set_status(
+            "Соединение с MAX потеряно. Ожидаю переподключения."
+            if reconnect else "Соединение с MAX остановлено."
+        )
+
     @client.on_message()
     async def got_message(message, connected):
-        if target_chat_id is None or message.chat_id != target_chat_id:
+        # Fail closed until the account identity and exact chat are verified.
+        if target_chat_id is None or own_user_id is None:
             return
-        if own_user_id is not None and message.sender == own_user_id:
+        if message.chat_id != target_chat_id:
+            return
+        if message.sender is None or message.sender == own_user_id:
             return
         if not MARKER.fullmatch(message.text or ""):
             return
@@ -165,7 +181,11 @@ async def serve(dialog):
         await client.start()
     except Exception:
         STATE.set_qr(b"")
-        STATE.set_status("Подключение MAX остановилось. Проверьте тестовую сессию и логи дополнения.")
+        STATE.set_status(
+            "Подключение MAX остановилось. Возможно, требуется повторный QR "
+            "или пароль 2FA (в этом тесте не поддерживается). "
+            "Никакие данные переписки не записаны в журнал."
+        )
         # Do not print exception details: a library error can contain secrets.
 
 
