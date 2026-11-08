@@ -60,6 +60,28 @@ def snapshot(page):
     })""")
 
 
+
+def find_test_dialog(page, name):
+    """Only select one *visible* exact-name match, never a fuzzy chat match."""
+    labels = page.get_by_text(name, exact=True)
+    total = labels.count()
+    if total > 50:
+        return None, total
+    visible = [labels.nth(i) for i in range(total) if labels.nth(i).is_visible()]
+    if len(visible) != 1:
+        return None, len(visible)
+
+    # Prefer the known chat-row markup, but do not depend on it.
+    rows = page.locator("button.cell").filter(has=visible[0])
+    if rows.count() == 1 and rows.first.is_visible():
+        return rows.first, 1
+    if rows.count() > 1:
+        return None, len(visible)
+    # Clicking the only visible exact-name label also works when MAX uses
+    # a div, link, or a differently named chat-row element.
+    return visible[0], 1
+
+
 def run(options):
     global status, qr
     if not options.get("test_confirmed"):
@@ -104,13 +126,14 @@ def run(options):
                 continue
             qr = b""
             if not opened:
-                # Exact chat label, no fallback to arbitrary chats.
-                button = page.locator("button.cell").filter(has=page.get_by_text(dialog, exact=True))
-                if button.count() != 1:
-                    status = "Жду единственный тестовый диалог с точным указанным именем."
+                target, matches = find_test_dialog(page, dialog)
+                if target is None:
+                    status = (f"Чат не найден в браузере дополнения: точных видимых совпадений "
+                              f"имени {matches}; нужно ровно одно. Проверьте вход через QR "
+                              f"и видимость чата в этом аккаунте MAX.")
                     time.sleep(3)
                     continue
-                button.click(timeout=5000)
+                target.click(timeout=5000)
                 opened = True
                 time.sleep(2)
             events = snapshot(page)
