@@ -59,7 +59,7 @@ with open(sys.argv[1], encoding="utf-8") as fp:
     cfg = json.load(fp)
 assert cfg["slug"] == "max_pymax_inbox"
 assert cfg["version"] == "1.0.0-rc1"
-assert cfg["boot"] == "manual"
+assert cfg["boot"] == "auto"
 assert cfg["arch"] == ["aarch64"]
 assert set(cfg["options"]) == {"bot_token", "work_chat_id"}
 PY
