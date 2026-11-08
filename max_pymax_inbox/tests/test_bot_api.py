@@ -9,12 +9,13 @@ from bot_api import BotApiError, MaxBotAPI, parse_chat_id
 
 
 class StubBot(MaxBotAPI):
-    def __init__(self, chat=-12345, public=False, status="active", webhook=False):
+    def __init__(self, chat=-12345, public=False, status="active", webhook=False, admin=True):
         self._token = "never_print_this_token"
         self.chat_id = chat
         self.public = public
         self.status = status
         self.webhook = webhook
+        self.admin = admin
         self.bot_id = None
         self.calls = []
 
@@ -22,6 +23,8 @@ class StubBot(MaxBotAPI):
         self.calls.append((method, path, params, body))
         if path == "/me":
             return {"user_id": 345, "username": "workbot"}
+        if path.endswith("/members/me"):
+            return {"user_id": 345, "is_admin": self.admin, "is_bot": True}
         if path.startswith("/chats/"):
             return {
                 "chat_id": self.chat_id, "type": "chat",
@@ -70,7 +73,7 @@ class BotApiTests(unittest.TestCase):
         self.assertIn("✅ Взял в работу: Иван", bot.calls[-1][3]["text"])
         self.assertEqual(bot.calls[-1][3]["attachments"], [])
         for bot in [StubBot(public=True), StubBot(status="removed"),
-                    StubBot(webhook=True)]:
+                    StubBot(webhook=True), StubBot(admin=False)]:
             with self.assertRaises(BotApiError):
                 bot.preflight()
 
