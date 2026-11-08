@@ -51,8 +51,22 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Check whether this release tag already exists
+        id: registry
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/rnztop/max_inbox_qr_pilot-aarch64:${{ steps.addon.outputs.version }}"
+          if docker buildx imagetools inspect "$IMAGE" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Image tag already published; skipping immutable release."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build and publish image
         uses: docker/build-push-action@v6
+        if: steps.registry.outputs.exists != 'true'
         with:
           context: ./max_inbox_qr_pilot
           file: ./max_inbox_qr_pilot/Dockerfile
