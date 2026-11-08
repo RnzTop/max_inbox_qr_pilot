@@ -14,7 +14,7 @@ from cursor import TestCursor
 from inbox import Inbox
 from run_group_test import MaxAPI
 from test_group import TestGroup
-from ws_binary_probe import scan_binary_frame
+from ws_binary_probe import frame_meta, scan_binary_frame
 
 
 DATA = Path("/data")
@@ -293,9 +293,41 @@ class WebSocketIdProbe:
             "frames": 0, "json": 0, "binary": 0, "large": 0, "other": 0,
             "protocol_frames": 0, "msgpack": 0, "lz4": 0, "zstd": 0,
             "header_miss": 0, "binary_decode_failed": 0,
+            "lz4_errors": 0, "msgpack_errors": 0,
             "chat_ids": 0, "message_ids": 0, "chat_refs": 0, "pairs": 0,
+            "history_requests": 0, "history_responses": 0,
+            "matched_history": 0, "history_ids": 0,
+            "live_frames": 0, "live_ids": 0, "live_with_chat": 0,
+            "login_frames": 0, "login_chat_ids": 0,
             "errors": 0,
         }
+        # Only packet sequence numbers and booleans. No chat/message IDs.
+        self._history_pending = {}
+
+    def _limit_pending(self):
+        if len(self._history_pending) > 256:
+            self._history_pending.clear()
+
+    def _on_sent_frame(self, raw):
+        """Record ONLY whether a history request included chatId, not its value."""
+        try:
+            if not isinstance(raw, bytes):
+                return
+            meta = frame_meta(raw)
+            if meta is None:
+                return
+            cmd, seq, opcode = meta
+            if cmd != 0 or opcode != 49:
+                return
+            kind, payload = scan_binary_frame(raw)
+            if kind not in ("msgpack", "lz4_msgpack"):
+                return
+            if isinstance(payload, dict) and self._has_id(payload.get("chatId")):
+                self.counts["history_requests"] += 1
+                self._limit_pending()
+                self._history_pending[seq] = True
+        except Exception:
+            self.counts["errors"] += 1
 
     def attach(self, page):
         # Attach BEFORE page.goto(). No interception/modification of traffic.
@@ -316,6 +348,7 @@ class WebSocketIdProbe:
             # single hard-coded hostname. Observe all sockets initiated by the
             # already-scoped web.max.ru page, without storing raw frames/URLs.
             ws.on("framereceived", self._on_frame)
+            ws.on("framesent", self._on_sent_frame)
             self.counts["watched"] += 1
         except Exception:
             # Do not expose an exception: WS URLs may contain credentials.
@@ -334,6 +367,7 @@ class WebSocketIdProbe:
                 return
             if isinstance(raw, bytes):
                 self.counts["binary"] += 1
+                meta = frame_meta(raw)
                 kind, data = scan_binary_frame(raw)
                 if kind == "zstd":
                     self.counts["zstd"] += 1
@@ -343,6 +377,10 @@ class WebSocketIdProbe:
                     return
                 if kind not in ("msgpack", "lz4_msgpack"):
                     self.counts["binary_decode_failed"] += 1
+                    if kind == "lz4_error":
+                        self.counts["lz4_errors"] += 1
+                    elif kind == "msgpack_error":
+                        self.counts["msgpack_errors"] += 1
                     return
                 self.counts["msgpack"] += 1
                 if kind == "lz4_msgpack":
@@ -350,6 +388,7 @@ class WebSocketIdProbe:
                 if isinstance(data, dict):
                     self.counts["protocol_frames"] += 1
                     self._observe_payload(data)
+                    self._observe_frame_class(meta, data)
                 return
             try:
                 frame = json.loads(raw)
@@ -366,6 +405,8 @@ class WebSocketIdProbe:
             if isinstance(data, dict):
                 self.counts["protocol_frames"] += 1
                 self._observe_payload(data)
+                self._observe_frame_class((frame.get("cmd"),
+                                           frame.get("seq"), frame.get("opcode")), data)
         except Exception:
             # Do not include any exceptions: they can embed customer data.
             self.counts["errors"] += 1
@@ -404,6 +445,36 @@ class WebSocketIdProbe:
                     self.counts["message_ids"] += 1
                     self.counts["pairs"] += 1
 
+    def _observe_frame_class(self, meta, data):
+        """Count live message IDs separately from login/history, without values."""
+        if meta is None or not isinstance(data, dict):
+            return
+        cmd, seq, opcode = meta
+        if opcode == 19 and cmd == 1:
+            self.counts["login_frames"] += 1
+            chats = data.get("chats")
+            if isinstance(chats, list):
+                self.counts["login_chat_ids"] += sum(
+                    isinstance(c, dict) and self._has_id(c.get("id"))
+                    for c in chats[:1000])
+        elif opcode == 49 and cmd == 1:
+            self.counts["history_responses"] += 1
+            messages = data.get("messages")
+            if isinstance(messages, list):
+                self.counts["history_ids"] += sum(
+                    isinstance(m, dict) and self._has_id(m.get("id"))
+                    for m in messages[:1000])
+            if self._history_pending.pop(seq, False):
+                self.counts["matched_history"] += 1
+        elif opcode == 128 and cmd == 0:
+            # Push-style message notification, NOT message history.
+            self.counts["live_frames"] += 1
+            message = data.get("message")
+            if isinstance(message, dict) and self._has_id(message.get("id")):
+                self.counts["live_ids"] += 1
+                if self._has_id(data.get("chatId")):
+                    self.counts["live_with_chat"] += 1
+
     def summary(self):
         c = {k: min(v, 999999) for k, v in self.counts.items()}
         return (
@@ -413,10 +484,16 @@ class WebSocketIdProbe:
             "кадров={frames}; JSON={json}; протокол MAX={protocol_frames}; "
             "двоичных={binary}; MessagePack={msgpack}; LZ4={lz4}; "
             "Zstd-пропущено={zstd}; неизвестный заголовок={header_miss}; "
-            "не удалось декодировать={binary_decode_failed}; слишком больших={large}; "
-            "не-JSON={other}; чатов с id={chat_ids}; "
-            "сообщений с id={message_ids}; кадров с chatId={chat_refs}; "
-            "пар chat+message={pairs}; ошибок проверки={errors}."
+            "не удалось декодировать={binary_decode_failed} "
+            "(LZ4={lz4_errors}, MessagePack={msgpack_errors}); "
+            "слишком больших={large}; не-JSON={other}; "
+            "чатов с id={chat_ids}; сообщений с id={message_ids}; "
+            "кадров с chatId={chat_refs}; пар chat+message={pairs}; "
+            "LOGIN кадров={login_frames}, чатов={login_chat_ids}; "
+            "история запросов={history_requests}, ответов={history_responses}, "
+            "связано по seq={matched_history}, message.id={history_ids}; "
+            "новых push кадров={live_frames}, message.id={live_ids}, "
+            "с chatId={live_with_chat}; ошибок проверки={errors}."
         ).format(**c)
 
 def run(options):
