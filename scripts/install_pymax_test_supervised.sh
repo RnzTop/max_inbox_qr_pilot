@@ -41,15 +41,15 @@ cleanup() {
 }
 trap cleanup EXIT
 base="https://raw.githubusercontent.com/RnzTop/max_inbox_qr_pilot/$REF/max_pymax_readonly"
-for f in Dockerfile config.yaml run.sh app.py id_store.py README.md DOCS.md; do
+for f in Dockerfile config.yaml run.sh app.py id_store.py history_recovery.py README.md DOCS.md; do
   curl --fail --silent --show-error --location \
     --retry 3 --max-time 40 "$base/$f" -o "$stage/$f"
 done
-python3 -m py_compile "$stage/app.py" "$stage/id_store.py"
+python3 -m py_compile "$stage/app.py" "$stage/id_store.py" "$stage/history_recovery.py"
 python3 -m json.tool "$stage/config.yaml" >/dev/null
 chmod 755 "$stage" "$stage/run.sh"
 chmod 644 "$stage/Dockerfile" "$stage/config.yaml" "$stage/app.py" \
-  "$stage/id_store.py" "$stage/README.md" "$stage/DOCS.md"
+  "$stage/id_store.py" "$stage/history_recovery.py" "$stage/README.md" "$stage/DOCS.md"
 mv -- "$stage" "$install_dir"
 trap - EXIT
 echo "Файлы тестового дополнения установлены: $install_dir"
