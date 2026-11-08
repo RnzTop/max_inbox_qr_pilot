@@ -26,6 +26,9 @@ class MockState:
     def set_qr(self, val):
         pass
 
+    def add_recovered(self, count):
+        pass
+
     def update_counts(self, store):
         self.unique = store.unique
         self.duplicates = store.duplicates
@@ -95,7 +98,7 @@ class FakeClient:
         msg = lambda chat, sender, text, mid: SimpleNamespace(
             chat_id=chat, sender=sender, text=text, id=mid,
         )
-        if "Сохранённая привязка" in self.state.statuses[-1]:
+        if FakeStore.paired and "История тестового чата проверена" in self.state.statuses[-1]:
             await self._message(msg(43, 200, "MAX HA TEST 8362", 17), self)
             await self._message(msg(42, 200, "MAX HA TEST 8362", 18), self)
             assert self.state.unique == 1
@@ -134,6 +137,11 @@ class PairingTests(unittest.TestCase):
 
         BoundClient.current_state = state
 
+        async def fake_recover(*args, **kwargs):
+            return SimpleNamespace(
+                scanned=0, recovered=0, complete=True, initialized=False
+            )
+
         namespace = {
             "DATA": Path("/tmp"),
             "SeenIds": FakeStore,
@@ -144,6 +152,7 @@ class PairingTests(unittest.TestCase):
             "STATE": state,
             "logging": logging,
             "secrets": secrets,
+            "recover_history": fake_recover,
         }
         exec(compile(ast.Module(body=[serve_fn], type_ignores=[]), "app.py", "exec"), namespace)
         asyncio.run(namespace["serve"]("Expected test name"))
