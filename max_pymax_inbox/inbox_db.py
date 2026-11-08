@@ -142,6 +142,22 @@ class InboxDB:
             ).rowcount
         return changed == 1
 
+    def recover_inflight(self):
+        # An abandoned or interrupted HTTP POST is ambiguous: no auto-resend.
+        with self.conn:
+            return self.conn.execute(
+                "UPDATE outbox SET state='uncertain' WHERE state='sending'"
+            ).rowcount
+
+    def redact_old_sent_bodies(self, days=30):
+        cutoff = int(time.time() * 1000) - days * 86_400_000
+        with self.conn:
+            return self.conn.execute(
+                "UPDATE outbox SET body='' WHERE state='sent' "
+                "AND created_ms < ? AND body != ''",
+                (cutoff,),
+            ).rowcount
+
     def counts(self, scope):
         rows = self.conn.execute(
             "SELECT state,COUNT(*) FROM outbox WHERE scope=? GROUP BY state",
