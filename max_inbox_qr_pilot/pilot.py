@@ -14,6 +14,7 @@ from cursor import TestCursor
 from inbox import Inbox
 from run_group_test import MaxAPI
 from test_group import TestGroup
+from ws_binary_probe import scan_binary_frame
 
 
 DATA = Path("/data")
@@ -290,7 +291,8 @@ class WebSocketIdProbe:
             "sockets": 0, "watched": 0,
             "oneme_sockets": 0, "max_sockets": 0, "other_sockets": 0,
             "frames": 0, "json": 0, "binary": 0, "large": 0, "other": 0,
-            "protocol_frames": 0,
+            "protocol_frames": 0, "msgpack": 0, "lz4": 0, "zstd": 0,
+            "header_miss": 0, "binary_decode_failed": 0,
             "chat_ids": 0, "message_ids": 0, "chat_refs": 0, "pairs": 0,
             "errors": 0,
         }
@@ -332,10 +334,23 @@ class WebSocketIdProbe:
                 return
             if isinstance(raw, bytes):
                 self.counts["binary"] += 1
-                try:
-                    raw = raw.decode("utf-8")
-                except UnicodeDecodeError:
+                kind, data = scan_binary_frame(raw)
+                if kind == "zstd":
+                    self.counts["zstd"] += 1
                     return
+                if kind == "missing_header":
+                    self.counts["header_miss"] += 1
+                    return
+                if kind not in ("msgpack", "lz4_msgpack"):
+                    self.counts["binary_decode_failed"] += 1
+                    return
+                self.counts["msgpack"] += 1
+                if kind == "lz4_msgpack":
+                    self.counts["lz4"] += 1
+                if isinstance(data, dict):
+                    self.counts["protocol_frames"] += 1
+                    self._observe_payload(data)
+                return
             try:
                 frame = json.loads(raw)
             except (ValueError, TypeError):
@@ -345,50 +360,49 @@ class WebSocketIdProbe:
                 self.counts["other"] += 1
                 return
             self.counts["json"] += 1
-            # Only recognize MAX-shaped protocol envelopes, not arbitrary
-            # telemetry that happens to have "id" or "messages" keys.
             if type(frame.get("opcode")) is not int or type(frame.get("cmd")) is not int:
                 return
             data = frame.get("payload")
-            if not isinstance(data, dict):
-                return
-            self.counts["protocol_frames"] += 1
-
-            # The protocol can carry a chat ID in the payload, a chat object,
-            # or each element of a chat-list reply. Never copy ID *values*.
-            chat_ref = self._has_id(data.get("chatId"))
-            chat = data.get("chat")
-            if isinstance(chat, dict) and self._has_id(chat.get("id")):
-                chat_ref = True
-                self.counts["chat_ids"] += 1
-            if chat_ref:
-                self.counts["chat_refs"] += 1
-
-            messages = data.get("messages")
-            items = messages[:1000] if isinstance(messages, list) else []
-            single = data.get("message")
-            if isinstance(single, dict):
-                items = items + [single]
-            count = sum(isinstance(m, dict) and self._has_id(m.get("id"))
-                        for m in items)
-            self.counts["message_ids"] += count
-            if chat_ref:
-                self.counts["pairs"] += count
-
-            chats = data.get("chats")
-            if isinstance(chats, list):
-                for item in chats[:1000]:
-                    if not isinstance(item, dict) or not self._has_id(item.get("id")):
-                        continue
-                    self.counts["chat_ids"] += 1
-                    last_message = item.get("lastMessage")
-                    if (isinstance(last_message, dict)
-                            and self._has_id(last_message.get("id"))):
-                        self.counts["message_ids"] += 1
-                        self.counts["pairs"] += 1
+            if isinstance(data, dict):
+                self.counts["protocol_frames"] += 1
+                self._observe_payload(data)
         except Exception:
-            # Errors are counts only; never include raw frame in diagnostics.
+            # Do not include any exceptions: they can embed customer data.
             self.counts["errors"] += 1
+
+    def _observe_payload(self, data):
+        # Whitelisted shape-only dicts for binary, regular JSON for text.
+        # NEVER emit IDs, secrets or actual message contents.
+        chat_ref = self._has_id(data.get("chatId"))
+        chat = data.get("chat")
+        if isinstance(chat, dict) and self._has_id(chat.get("id")):
+            chat_ref = True
+            self.counts["chat_ids"] += 1
+        if chat_ref:
+            self.counts["chat_refs"] += 1
+
+        messages = data.get("messages")
+        items = messages[:1000] if isinstance(messages, list) else []
+        single = data.get("message")
+        if isinstance(single, dict):
+            items = items + [single]
+        count = sum(isinstance(m, dict) and self._has_id(m.get("id"))
+                    for m in items)
+        self.counts["message_ids"] += count
+        if chat_ref:
+            self.counts["pairs"] += count
+
+        chats = data.get("chats")
+        if isinstance(chats, list):
+            for item in chats[:1000]:
+                if not isinstance(item, dict) or not self._has_id(item.get("id")):
+                    continue
+                self.counts["chat_ids"] += 1
+                last_message = item.get("lastMessage")
+                if (isinstance(last_message, dict)
+                        and self._has_id(last_message.get("id"))):
+                    self.counts["message_ids"] += 1
+                    self.counts["pairs"] += 1
 
     def summary(self):
         c = {k: min(v, 999999) for k, v in self.counts.items()}
@@ -397,7 +411,9 @@ class WebSocketIdProbe:
             "сокетов={sockets}; наблюдаемых={watched}; "
             "адреса oneme={oneme_sockets}, max={max_sockets}, другие={other_sockets}; "
             "кадров={frames}; JSON={json}; протокол MAX={protocol_frames}; "
-            "двоичных={binary}; слишком больших={large}; "
+            "двоичных={binary}; MessagePack={msgpack}; LZ4={lz4}; "
+            "Zstd-пропущено={zstd}; неизвестный заголовок={header_miss}; "
+            "не удалось декодировать={binary_decode_failed}; слишком больших={large}; "
             "не-JSON={other}; чатов с id={chat_ids}; "
             "сообщений с id={message_ids}; кадров с chatId={chat_refs}; "
             "пар chat+message={pairs}; ошибок проверки={errors}."
