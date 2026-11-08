@@ -39,7 +39,10 @@ def handle_callback(update, store, scope, work_chat_id, bot_id):
     author = message.get("sender")
     if isinstance(author, dict) and author.get("user_id") != bot_id:
         return "ignored", None
-    match = PAYLOAD_RE.fullmatch(callback.get("payload") or "")
+    payload = callback.get("payload")
+    if not isinstance(payload, str) or len(payload) != 69:
+        return "ignored", None
+    match = PAYLOAD_RE.fullmatch(payload)
     if not match:
         return "ignored", None
     original_mid = body.get("mid")
