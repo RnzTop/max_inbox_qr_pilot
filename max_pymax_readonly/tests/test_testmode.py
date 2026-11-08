@@ -68,6 +68,32 @@ class SeenIdsTests(unittest.TestCase):
         self.assertEqual(store.count(), 0)
         store.conn.close()
 
+    def test_test_chat_binding_is_private_and_survives_restart(self):
+        store = SeenIds(self.folder)
+        self.assertIsNone(store.get_binding(12345678, "Test dialogue"))
+        tag = store.bind_chat(12345678, "Test dialogue", 987654321012)
+        self.assertEqual(len(tag), 64)
+        self.assertTrue(store.is_bound_chat(
+            12345678, "Test dialogue", 987654321012, tag
+        ))
+        self.assertFalse(store.is_bound_chat(
+            12345678, "Test dialogue", 987654321011, tag
+        ))
+        store.conn.close()
+        store = SeenIds(self.folder)
+        restored = store.get_binding(12345678, "Test dialogue")
+        self.assertEqual(restored, tag)
+        self.assertIsNone(store.get_binding(12345679, "Test dialogue"))
+        self.assertIsNone(store.get_binding(12345678, "Other dialogue"))
+        self.assertTrue(store.is_bound_chat(
+            12345678, "Test dialogue", 987654321012, restored
+        ))
+        data = (self.folder / "seen.sqlite3").read_bytes()
+        self.assertNotIn(b"987654321012", data)
+        self.assertNotIn(b"12345678", data)
+        self.assertNotIn(b"Test dialogue", data)
+        store.conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()
