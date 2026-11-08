@@ -55,14 +55,40 @@ class InboxDB:
             created_ms INTEGER NOT NULL,
             sent_mid TEXT
         )""")
+        # Migration is additive; previous queued and sent messages are intact.
+        for column, definition in {
+            "assignee_mac": "TEXT",
+            "assignee_name": "TEXT",
+            "claimed_at_ms": "INTEGER",
+            "claim_edit": "TEXT",
+        }.items():
+            fields = {
+                row[1] for row in self.conn.execute("PRAGMA table_info(outbox)")
+            }
+            if column not in fields:
+                self.conn.execute(
+                    f"ALTER TABLE outbox ADD COLUMN {column} {definition}"
+                )
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS callback_markers (
+            bot_scope TEXT PRIMARY KEY, marker INTEGER NOT NULL
+        )""")
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS inbox_queued ON outbox(scope,state,created_ms)"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS inbox_claim_edits "
+            "ON outbox(scope,claim_edit,created_ms)"
         )
         self.conn.commit()
         # An interrupted outbound POST might already have succeeded.
         # Never automatically retry ambiguous interrupted requests.
         self.conn.execute(
             "UPDATE outbox SET state='uncertain' WHERE state='sending'"
+        )
+        # Editing existing messages is idempotent; resume after reboot.
+        self.conn.execute(
+            "UPDATE outbox SET claim_edit='pending' "
+            "WHERE claim_edit='editing'"
         )
         self.conn.commit()
 
@@ -115,6 +141,104 @@ class InboxDB:
                 (digest, scope, body, int(time.time() * 1000)),
             )
         return cur.rowcount == 1
+
+    def callback_scope(self, bot_id, work_chat_id):
+        if bot_id is None or work_chat_id is None:
+            raise ValueError("Missing bot or work group")
+        return self.fingerprint(
+            "max-callback-scope-v1", bot_id, work_chat_id
+        )
+
+    def callback_marker(self, bot_scope):
+        row = self.conn.execute(
+            "SELECT marker FROM callback_markers WHERE bot_scope=?",
+            (bot_scope,),
+        ).fetchone()
+        return row[0] if row is not None else None
+
+    def save_callback_marker(self, bot_scope, marker):
+        if type(marker) is not int or marker < 0:
+            raise ValueError("Invalid callback marker")
+        previous = self.callback_marker(bot_scope)
+        if previous is not None and marker < previous:
+            raise ValueError("Callback marker cannot move backwards")
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO callback_markers(bot_scope,marker) VALUES (?,?) "
+                "ON CONFLICT(bot_scope) DO UPDATE SET marker=excluded.marker",
+                (bot_scope, marker),
+            )
+
+    def claim(self, scope, fingerprint, message_id, user_id, display_name):
+        """Atomically assign one sent card only to the first real employee."""
+        import re
+        if (not isinstance(fingerprint, str)
+                or not re.fullmatch("[0-9a-f]{64}", fingerprint)
+                or not isinstance(message_id, str) or not message_id
+                or user_id is None or isinstance(user_id, bool)
+                or not isinstance(display_name, str) or not display_name):
+            return "invalid"
+        identity_mac = self.fingerprint(
+            "max-employee-v1", scope, user_id
+        )
+        with self.conn:
+            result = self.conn.execute(
+                "UPDATE outbox SET assignee_mac=?,assignee_name=?,"
+                "claimed_at_ms=?,claim_edit='pending' "
+                "WHERE fingerprint=? AND scope=? AND state='sent' "
+                "AND sent_mid=? AND assignee_mac IS NULL",
+                (identity_mac, display_name[:100], int(time.time() * 1000),
+                 fingerprint, scope, message_id),
+            )
+            if result.rowcount == 1:
+                return "claimed"
+            row = self.conn.execute(
+                "SELECT assignee_mac FROM outbox "
+                "WHERE fingerprint=? AND scope=? AND state='sent' "
+                "AND sent_mid=?",
+                (fingerprint, scope, message_id),
+            ).fetchone()
+            if row is None:
+                return "unmatched"
+            return "already_claimed"
+
+    def reserve_claim_edit(self, scope):
+        with self.conn:
+            row = self.conn.execute(
+                "SELECT fingerprint,sent_mid,body,assignee_name "
+                "FROM outbox WHERE scope=? AND state='sent' "
+                "AND claim_edit='pending' "
+                "ORDER BY claimed_at_ms LIMIT 1",
+                (scope,),
+            ).fetchone()
+            if row is None:
+                return None
+            changed = self.conn.execute(
+                "UPDATE outbox SET claim_edit='editing' "
+                "WHERE fingerprint=? AND claim_edit='pending'",
+                (row[0],),
+            ).rowcount
+            return row if changed else None
+
+    def finish_claim_edit(self, fingerprint, status):
+        if status not in ("done", "pending", "failed"):
+            raise ValueError("Invalid edit completion state")
+        with self.conn:
+            return self.conn.execute(
+                "UPDATE outbox SET claim_edit=? "
+                "WHERE fingerprint=? AND claim_edit='editing'",
+                (status, fingerprint),
+            ).rowcount == 1
+
+    def claimed_counts(self, scope):
+        rows = self.conn.execute(
+            "SELECT COUNT(*),"
+            "SUM(CASE WHEN claim_edit IN ('pending','editing') "
+            "THEN 1 ELSE 0 END) FROM outbox "
+            "WHERE scope=? AND assignee_mac IS NOT NULL",
+            (scope,),
+        ).fetchone()
+        return int(rows[0]), int(rows[1] or 0)
 
     def reserve(self, scope):
         with self.conn:
